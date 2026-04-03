@@ -1,0 +1,18 @@
+# 1. Read the design
+read_verilog designs/simple.v
+
+# 2. Basic Synthesis
+hierarchy -top simple
+proc; opt; fsm; opt;
+
+# 3. Map to generic flip-flops (This creates the clock domain ABC needs)
+techmap; opt
+
+# 4. Run ABC with the clock constraint
+# Note: In Yosys, -clk defines the target period in ps.
+# 100MHz = 10000ps
+abc -clk 10000
+
+# 5. Output results
+stat
+write_json reports/simple.json
