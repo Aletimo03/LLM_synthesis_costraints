@@ -3,7 +3,6 @@ import subprocess
 import sys
 
 ROOT = Path(__file__).resolve().parent.parent
-#ORFS = ROOT / "external" / "OpenROAD-flow-scripts"
 REPORTS = ROOT / "reports"
 REPORTS.mkdir(exist_ok=True)
 
@@ -12,8 +11,8 @@ log_file = REPORTS / f"{case_name}.log"
 
 cmd = [
     "yosys",
-    "-s", "scripts/run_yosys.ys",
-    "-l", "reports/simple.log"  # This saves the human-readable text
+    "-c", "scripts/run_yosys.ys",
+    "-l", "reports/simple.log"
 ]
 
 result = subprocess.run(cmd, text=True, cwd=ROOT)

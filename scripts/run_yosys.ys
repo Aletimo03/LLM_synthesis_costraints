@@ -1,18 +1,35 @@
-# 1. Read the design
-read_verilog designs/simple.v
+# ----------------------------------------------------------------------------
+# run_yosys.ys (Tcl Mode)
+# ----------------------------------------------------------------------------
 
-# 2. Basic Synthesis
-hierarchy -top simple
-proc; opt; fsm; opt;
+# 1. Read the Verilog design
+yosys read_verilog designs/simple.v
 
-# 3. Map to generic flip-flops (This creates the clock domain ABC needs)
-techmap; opt
+# 2. Design Exploration
+yosys hierarchy -top simple
+yosys proc
+yosys opt
+yosys fsm
+yosys opt
 
-# 4. Run ABC with the clock constraint
-# Note: In Yosys, -clk defines the target period in ps.
-# 100MHz = 10000ps
-abc -clk 10000
+# 3. Handle SDC Constraints
+# The 'sdc' command is a built-in Tcl wrapper in Yosys
+yosys sdc constraints/generated.sdc
 
-# 5. Output results
-stat
-write_json reports/simple.json
+# 4. Techmap
+yosys techmap
+yosys opt
+
+# 5. Timing-Driven Mapping via ABC
+yosys abc
+
+# 6. Final Clean-up
+yosys opt_clean -purge
+
+# 7. Reporting
+yosys stat
+yosys write_verilog reports/synthesis_output.v
+yosys write_json reports/simple.json
+
+# Pure Tcl command to close the session gracefully
+exit
