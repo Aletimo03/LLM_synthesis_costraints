@@ -1,0 +1,21 @@
+Your previous SDC constraints failed.
+
+Previous SDC:
+```
+{previous_sdc}
+```
+
+Error from the tool:
+```
+{error_message}
+```
+
+Verilog design (for reference):
+```
+{verilog}
+```
+
+Target clock period: {clock_period_ns} ns
+
+Fix the SDC so it passes. Output ONLY corrected SDC commands, one per line.
+No markdown, no comments, no explanation, no reasoning tags.
