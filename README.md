@@ -292,7 +292,7 @@ One row per pipeline run. Key columns:
 
 ---
 
-### Future steps
+## Future steps
 
 - Extend the correction loop to fire on `ineffective_no_paths` and
   `timing_violation`, not just synthesis failure.
