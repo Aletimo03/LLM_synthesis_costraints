@@ -90,16 +90,6 @@ LLM_synthesis_costraints/
 | **OpenSTA** | 3.1.0 (built from source) | Static Timing Analysis (WNS, TNS, slack) |
 | **Nangate45** | open standard cell lib | Liberty file used by both ABC and OpenSTA |
 
-### Python dependencies
-
-Declared in `pyproject.toml`:
-
-- `ollama` — Python client for the local Ollama daemon
-
-That's it. The pipeline is intentionally dependency-light. OpenSTA and Yosys
-are invoked as subprocesses.
-
----
 
 ## One-Time Setup
 
@@ -206,16 +196,13 @@ All commands run from the project root with the venv Python.
 | `--no-correction` | off | Disable the LLM correction/retry loop |
 | `--model <name>` | `qwen3:8b` | Override the Ollama model |
 
-### Running from PyCharm
+### Running in PyCharm IDE
 
 1. Open the project root in PyCharm.
 2. Set the interpreter to `.venv/bin/python` (Settings → Project → Python Interpreter).
 3. Right-click `scripts/run_pipeline.py` → Modify Run Configuration → set
    "Parameters" to e.g. `--design designs/simple.v --reference`.
 4. Run.
-
-If imports show as unresolved, run `pip install -e .` once — that registers
-the `pipeline` package with the interpreter PyCharm is using.
 
 ---
 
@@ -305,18 +292,7 @@ One row per pipeline run. Key columns:
 
 ---
 
-## Current Status
-
-- Pipeline runs end-to-end on all 6 designs.
-- Initial dataset (12 LLM runs across 6 designs, 2 seeds each + 6 reference
-  baselines) sits in `results/dataset.csv`.
-- First-pass Qwen3:8b success rate: **7/12 (58%)**. Common failure modes:
-  - 4× *ineffective constraint* — model omits `-clock <name>` on
-    `set_input_delay` / `set_output_delay`, leaving STA with no analyzable
-    paths.
-  - 1× *timing violation* — model picked a delay budget that didn't fit.
-
-### Next steps (not yet implemented)
+### Future steps
 
 - Extend the correction loop to fire on `ineffective_no_paths` and
   `timing_violation`, not just synthesis failure.
@@ -324,4 +300,4 @@ One row per pipeline run. Key columns:
 - Add an analysis script: success rate tables, error heatmaps, slack
   distributions.
 - Compare prompt versions (`v1_base` vs. an examples-augmented `v2`).
-- Write the 1-2 page initial deliverable doc.
+- Compare llm models.
