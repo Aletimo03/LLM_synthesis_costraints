@@ -1,0 +1,160 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{array}
+\usepackage{enumitem}
+\usepackage[hidelinks]{hyperref}
+
+\title{LLM-Generated Synthesis Constraints\\Current Project Status}
+\author{Alessio Timofte}
+\date{May 2026}
+
+\begin{document}
+\maketitle
+
+\section*{Research Objective}
+The core question is:
+\begin{quote}
+Can a (local) LLM generate synthesis constraints that are correct enough to support ASIC-style synthesis and timing analysis, and how often do those constraints preserve useful QoR relative to a reference baseline?
+\end{quote}
+
+The framework currently studies this question through four linked goals:
+\begin{enumerate}[leftmargin=*,nosep]
+    \item generate SDC constraints from RTL plus a target clock period,
+    \item validate the constraints through a real synthesis and STA flow,
+    \item classify the resulting behavior into meaningful failure or success labels,
+    \item compare LLM-generated runs against trusted reference constraints.
+\end{enumerate}
+
+\section*{Current Architecture}
+The repository is now organized around a dedicated Python package, \texttt{pipeline/}, which implements the full experiment loop:
+
+\begin{enumerate}[leftmargin=*,nosep]
+    \item \textbf{LLM generation} via \texttt{pipeline/llm.py}. A prompt template is filled with Verilog source and target period, then sent to a local Ollama model.
+    \item \textbf{Output cleaning} removes reasoning tags, code fences, and non-SDC text, keeping only recognized constraint commands.
+    \item \textbf{Synthesis} via \texttt{pipeline/synthesis.py}. Yosys reads the RTL, runs standard optimization and mapping passes, and invokes ABC with a liberty-based timing target.
+    \item \textbf{Static Timing Analysis} via \texttt{pipeline/sta.py}. OpenSTA reads the synthesized netlist and the generated SDC, then reports WNS, TNS, minimum slack, and path-level timing behavior.
+    \item \textbf{Classification} via \texttt{pipeline/classifier.py}. Each run is labeled using both tool logs and the content of the generated SDC.
+    \item \textbf{Dataset logging} via \texttt{pipeline/dataset.py}. Each experiment appends one row to \texttt{results/dataset.csv}.
+\end{enumerate}
+
+An additional correction loop is already implemented. When synthesis fails in LLM mode, the failing SDC and tool error are fed back to the model to request a corrected version, up to a bounded number of retries.
+
+\section*{Toolchain and Environment}
+\begin{table}[h]
+\centering
+\begin{tabularx}{\textwidth}{>{\raggedright\arraybackslash}p{0.24\textwidth} >{\raggedright\arraybackslash}p{0.26\textwidth} X}
+\toprule
+\textbf{Component} & \textbf{Current Choice} & \textbf{Role in the Project} \\
+\midrule
+Language model & Ollama + \texttt{qwen3:8b} & Local generation of SDC constraints and correction attempts \\
+Synthesis engine & Yosys 0.63 & RTL elaboration, optimization, mapping, reporting \\
+Technology mapper & ABC (via Yosys) & Liberty-aware mapping with a delay target derived from \texttt{create\_clock} \\
+Timing analyzer & OpenSTA 3.1.0 & Post-synthesis timing analysis and slack extraction \\
+Cell library & Nangate45 liberty & Common timing library shared by synthesis and STA \\
+Implementation language & Python 3.11+ & Orchestration, parsing, classification, dataset logging \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+The project remains intentionally lightweight: the only declared Python dependency is the \texttt{ollama} client package, while Yosys and OpenSTA are invoked as subprocess tools. This keeps the framework portable and easy to reproduce on a local macOS setup.
+
+\section*{Benchmark Set}
+The current benchmark suite contains six RTL designs, each paired with a trusted reference SDC under \texttt{designs/reference/}:
+
+\begin{table}[h]
+\centering
+\begin{tabularx}{\textwidth}{>{\ttfamily\raggedright\arraybackslash}p{0.23\textwidth} X}
+\toprule
+\textbf{Design} & \textbf{Purpose} \\
+\midrule
+simple.v & Minimal sanity-check design for verifying the end-to-end flow \\
+counter.v & Sequential logic with reset and enable behavior \\
+fsm.v & Small finite-state machine benchmark \\
+adder.v & Registered arithmetic datapath \\
+alu.v & Multi-operation combinational and sequential datapath case \\
+shift\_reg.v & Serial-in / parallel-out sequential structure \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+This is a sensible first benchmark layer: the designs are diverse enough to expose clocking, port coverage, and timing-path issues, while still being small enough for fast iterative experimentation.
+
+\section*{What the Framework Measures}
+Each run records both correctness and QoR-related information. The current CSV schema captures:
+\begin{itemize}[leftmargin=*,nosep]
+    \item metadata: design name, top module, model name, seed, prompt version, run directory;
+    \item structural properties of the produced SDC: number of extracted commands, presence of \texttt{create\_clock}, number of input and output delay statements;
+    \item synthesis metrics: success status, runtime, total cell count, chip area;
+    \item timing metrics: STA success, WNS, TNS, minimum slack, timing-met flag, number of setup violations, no-paths detection;
+    \item semantic classification: primary label, all labels, and a short rationale.
+\end{itemize}
+
+This is a strong design choice because it allows the project to separate several qualitatively different outcomes:
+\begin{itemize}[leftmargin=*,nosep]
+    \item fully accepted constraints,
+    \item syntactically accepted but ineffective constraints,
+    \item timing-violating constraints,
+    \item synthesis or STA failures caused by bad constraint content.
+\end{itemize}
+
+\section*{Current Dataset}
+As of \textbf{May 12, 2026}, the repository already contains a first dataset snapshot in \texttt{results/dataset.csv}.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lrr}
+\toprule
+\textbf{Run category} & \textbf{Count} & \textbf{Share} \\
+\midrule
+Reference runs & 6 & 25.0\% \\
+LLM-generated runs & 18 & 75.0\% \\
+% Total recorded runs & 24 & 100.0\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The six reference runs all completed successfully and provide a clean control baseline for every current design.
+
+For the 18 LLM-generated runs using \texttt{qwen3:8b}, the present outcome distribution is:
+\begin{table}[h]
+\centering
+\begin{tabular}{lrr}
+\toprule
+\textbf{LLM outcome} & \textbf{Count} & \textbf{Share of LLM runs} \\
+\midrule
+Accepted / timing met & 10 & 55.6\% \\
+Ineffective: no timing paths & 5 & 27.8\% \\
+Timing violation & 2 & 11.1\% \\
+STA failure & 1 & 5.6\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+These early results are already informative. The model frequently produces constraints that are syntactically usable and sometimes fully acceptable, but a substantial fraction remains \emph{ineffective}: the tools run, yet the constraint set fails to define a meaningful launch/capture timing relationship. This is an important finding because it shows that ``tool acceptance'' alone is not a sufficient success criterion.
+
+At the design level, the current snapshot suggests:
+\begin{itemize}[leftmargin=*,nosep]
+    \item \texttt{fsm}, \texttt{shift\_reg}, and most \texttt{counter} runs are stable and accepted;
+    \item \texttt{adder} is more fragile, showing both ineffective and timing-violating outcomes;
+    \item \texttt{simple} consistently produces ineffective constraints under the current prompt/model setup;
+    \item \texttt{alu} is mostly successful but not perfectly stable across seeds.
+\end{itemize}
+
+More importantly, the present results already expose non-trivial behavior. The LLM does not simply fail or succeed but it produces a spectrum of outcomes ranging from acceptable constraints to misleadingly valid but ineffective ones.
+
+\section*{Next Steps}
+The most valuable next improvements are now experimental rather than infrastructural:
+\begin{enumerate}[leftmargin=*,nosep]
+    \item expand the benchmark set with designs that stress multiple clocks, generated clocks, and more complex timing interfaces;
+    \item compare multiple Ollama-served models and prompt versions instead of a single default configuration;
+    \item quantify the correction loop separately to measure whether retry-based self-repair materially improves acceptance rate;
+    \item add analysis scripts or plots for success rate, label frequency, and QoR deviation against the reference baseline;
+    \item refine prompts to reduce the ``no timing paths'' failure mode, which is currently one of the most important weaknesses.
+\end{enumerate}
+
+\end{document}
