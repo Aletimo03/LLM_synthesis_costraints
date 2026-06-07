@@ -234,11 +234,36 @@ All commands run from the project root with the venv Python.
    across all paths, and a "no paths found" flag.
 
 4. **Classification** — `pipeline/classifier.py` assigns multi-label tags
-   to the run based on what the LLM produced and what the tools said.
-   Labels: `empty_output`, `no_valid_sdc_lines`, `missing_create_clock`,
-   `syntax_error`, `port_reference_error`, `non_numeric_value`,
-   `synthesis_failure`, `sta_failure`, `timing_violation`,
-   `ineffective_constraint`, `accepted`, `accepted_partial`.
+   to the run based on what the LLM produced and what the tools said. These are
+   different from `final_status`: labels explain the cause, while `final_status`
+   gives the simplified end result used for high-level summaries. A run can have
+   multiple labels in `all_labels`; `primary_label` is the highest-priority label.
+
+   | Label | Meaning | Typical cause / interpretation |
+   |---|---|---|
+   | `empty_output` | The LLM returned no usable text. | Model call produced an empty response. |
+   | `no_valid_sdc_lines` | The LLM responded, but no cleaned line started with a supported SDC command. | Markdown, explanations, malformed commands, or non-SDC text dominated the response. |
+   | `missing_create_clock` | Valid SDC lines exist, but no `create_clock` or `create_generated_clock` was found. | The timing environment is incomplete; STA may not form meaningful paths. |
+   | `syntax_error` | Yosys/OpenSTA reported an SDC syntax or command error. | Bad option, invalid command, wrong argument count, parse error, or invalid value. |
+   | `port_reference_error` | A constraint referenced a port/object the tool could not find. | The LLM invented or misspelled a Verilog port name. |
+   | `non_numeric_value` | A clock period or delay value was not numeric. | Example: `-period five` or a placeholder delay string. |
+   | `synthesis_failure` | Yosys did not complete successfully. | RTL/tool failure or a synthesis-stage issue; currently correction only triggers on this class. |
+   | `sta_failure` | OpenSTA failed to complete timing analysis. | Usually malformed SDC or invalid objects/options during `read_sdc` or timing setup. |
+   | `timing_violation` | STA ran and found timing paths, but at least one path had negative slack. | The generated constraints are valid enough to analyze, but timing is not met. |
+   | `ineffective_constraint` | STA ran but reported no timing paths. | The SDC is syntactically accepted but does not define a useful launch/capture timing relationship. |
+   | `accepted` | Synthesis and STA passed, timing paths exist, and timing is met. | Fully successful run. |
+   | `accepted_partial` | The run passed timing despite minor classification labels. | Reserved for usable-but-imperfect constraint sets. |
+
+   The simplified `final_status` field is assigned later in
+   `pipeline/orchestrator.py`:
+
+   | Final status | Meaning | Closest classification label |
+   |---|---|---|
+   | `ok` | Synthesis passed, STA passed, timing paths exist, and timing is met. | `accepted` |
+   | `timing_violation` | Synthesis and STA passed, but timing failed. | `timing_violation` |
+   | `ineffective_no_paths` | Synthesis and STA passed, but STA found no timing paths. | `ineffective_constraint` |
+   | `sta_failed` | Synthesis passed, but OpenSTA failed. | `sta_failure` |
+   | `synth_failed` | Yosys synthesis failed, so STA was skipped. | `synthesis_failure` |
 
 5. **Recording** — `pipeline/dataset.py` appends one row to
    `results/dataset.csv` with everything the report needs.
