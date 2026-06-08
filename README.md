@@ -55,7 +55,9 @@ LLM_synthesis_costraints/
 │                            (used by Yosys/ABC for tech mapping & by OpenSTA)
 │
 ├── scripts/
-│   └── run_pipeline.py    CLI entry point (argparse, runs single or batch)
+│   ├── run_pipeline.py    CLI entry point (argparse, runs single or batch)
+│   ├── analyze_results.py summary tables (v1-vs-v2, coverage, per-group slack)
+│   └── rerun_sta.py       replay OpenSTA on saved netlists, rebuild dataset
 │
 ├── results/
 │   └── dataset.csv          append-only master dataset, one row per run
@@ -69,6 +71,7 @@ LLM_synthesis_costraints/
 │         netlist.v / .json    synthesized gate-level netlist
 │         sta.tcl              generated OpenSTA Tcl script
 │         sta.log              full OpenSTA log
+│         coverage.txt         path-group counts + full violating-path list
 │         correction_<n>/      artifacts of correction-loop retries
 │
 ├── pyproject.toml         declares the `pipeline` Python package
@@ -122,14 +125,26 @@ make -j8
 by default. Override via the `OPENSTA_BIN` environment variable if you put it
 elsewhere.
 
-### 3. Pull the LLM model into Ollama
+### 3. Start the Ollama server and pull the LLM model
+
+The pipeline's `pipeline/llm.py` uses the `ollama` Python client, which talks to
+the local Ollama **daemon** over HTTP (`http://localhost:11434`). That daemon
+must be running before any LLM run, otherwise generation fails with a connection
+error.
 
 ```bash
-ollama pull qwen3:8b
+ollama serve            # start the daemon (or just launch the Ollama.app)
+ollama pull qwen3:8b    # download the model (one-time; served by the daemon)
+ollama list             # sanity check: qwen3:8b should appear
 ```
 
+`ollama serve` runs in the foreground — leave it in its own terminal, or rely on
+the macOS Ollama.app which runs it as a background service. `ollama pull` and
+every pipeline run route through this same daemon. Reference runs
+(`--reference`) skip the LLM entirely and therefore do **not** need the daemon.
+
 Different models are configurable via the `LLM_MODEL` env var or the
-`--model` CLI flag. Anything Ollama supports works.
+`--model` CLI flag. Anything Ollama serves works.
 
 ### 4. Python environment
 
@@ -184,6 +199,54 @@ All commands run from the project root with the venv Python.
 .venv/bin/python scripts/run_pipeline.py --all --reference
 ```
 
+### Compare prompt versions (v1 vs v2)
+
+`v2_base` adds the two structural requirements `v1_base` lacked — name the clock
+with `-name`, and attach `-clock` to every `set_input_delay` / `set_output_delay`
+(delay values are deliberately left to the model). This is what eliminates the
+`partial_coverage` failures. Run both on the same designs/seeds to measure the
+difference:
+
+```bash
+# every design, seeds 1-3, both prompt versions
+.venv/bin/python scripts/run_pipeline.py --all --seeds 1 2 3 --compare-prompts
+
+# or a single prompt version explicitly
+.venv/bin/python scripts/run_pipeline.py --design designs/adder.v --prompt-version v2_base
+```
+
+### Full experiment in one go (reference + both prompts, 3 seeds)
+
+```bash
+# 1. control baseline (no LLM, no daemon needed)
+.venv/bin/python scripts/run_pipeline.py --all --reference
+
+# 2. LLM runs: every design × seeds 1-3 × {v1_base, v2_base}  (needs ollama serve)
+.venv/bin/python scripts/run_pipeline.py --all --seeds 1 2 3 --compare-prompts
+
+# 3. summary tables (status, coverage, per-group slack, v1-vs-v2)
+.venv/bin/python scripts/analyze_results.py
+```
+
+Each row is appended to `results/dataset.csv`; re-running adds more rows rather
+than overwriting, so seeds and prompt versions accumulate.
+
+### Re-timing existing runs (no LLM re-sampling)
+
+If you change the STA stage (the OpenSTA TCL or the slack/coverage parsing in
+`pipeline/sta.py`), the existing rows in `dataset.csv` were produced by the old
+logic. `rerun_sta.py` replays OpenSTA on each run's **saved netlist + SDC** with
+the current TCL and rebuilds every timing/coverage column — without re-calling
+the LLM or Yosys:
+
+```bash
+.venv/bin/python scripts/rerun_sta.py
+```
+
+This is deterministic and cheap (~6 s for 60 runs). Use it instead of re-running
+the whole pipeline, which would re-sample the LLM (non-deterministic) and waste
+synthesis time on an unchanged netlist.
+
 ### Useful flags
 
 | Flag | Default | Meaning |
@@ -195,6 +258,8 @@ All commands run from the project root with the venv Python.
 | `--reference` | off | Skip LLM, use `designs/reference/<name>.sdc` |
 | `--no-correction` | off | Disable the LLM correction/retry loop |
 | `--model <name>` | `qwen3:8b` | Override the Ollama model |
+| `--prompt-version <v>` | `v1_base` | Prompt template: `v1_base` or `v2_base` |
+| `--compare-prompts` | off | Run every prompt version on each design/seed for comparison |
 
 ### Running in PyCharm IDE
 
@@ -259,11 +324,21 @@ All commands run from the project root with the venv Python.
 
    | Final status | Meaning | Closest classification label |
    |---|---|---|
-   | `ok` | Synthesis passed, STA passed, timing paths exist, and timing is met. | `accepted` |
+   | `ok` | Synthesis passed, STA passed, timing met, **and all required path groups (in2reg, reg2out) were actually analyzed.** | `accepted` |
+   | `partial_coverage` | Synthesis and STA passed and timing is met, **but the I/O timing environment was never fully constrained** — typically only reg2reg paths were analyzed because `set_input_delay` / `set_output_delay` lacked a `-clock` association. The "pass" is only earned on the subset of paths that were timed. | `incomplete_timing_coverage` |
    | `timing_violation` | Synthesis and STA passed, but timing failed. | `timing_violation` |
    | `ineffective_no_paths` | Synthesis and STA passed, but STA found no timing paths. | `ineffective_constraint` |
    | `sta_failed` | Synthesis passed, but OpenSTA failed. | `sta_failure` |
    | `synth_failed` | Yosys synthesis failed, so STA was skipped. | `synthesis_failure` |
+
+   **Why `partial_coverage` matters:** OpenSTA silently skips unconstrained ports
+   rather than erroring, so a constraint set that forgets to clock-associate its
+   I/O delays still reports clean timing — but only on register-to-register
+   paths, which are timed by `create_clock` alone and essentially cannot fail.
+   The pipeline therefore parses every reported path into a *path group*
+   (`in2reg`, `reg2out`, `reg2reg`, `in2out`, `async`) and compares observed
+   coverage against what the design structurally requires. A run is only `ok`
+   when the input→register and register→output groups are genuinely analyzed.
 
 5. **Recording** — `pipeline/dataset.py` appends one row to
    `results/dataset.csv` with everything the report needs.
@@ -301,7 +376,7 @@ One row per pipeline run. Key columns:
 | `seed` | int | LLM sampling seed (blank for reference / single runs) |
 | `clock_period_ns` | float | Effective period (from SDC or fallback) |
 | `correction_attempts` | int | How many retries the correction loop ran |
-| `final_status` | enum | `ok`, `timing_violation`, `ineffective_no_paths`, `sta_failed`, `synth_failed` |
+| `final_status` | enum | `ok`, `partial_coverage`, `timing_violation`, `ineffective_no_paths`, `sta_failed`, `synth_failed` |
 | `primary_label` | enum | Top classification label |
 | `all_labels` | str | `\|`-separated list of all matched labels |
 | `has_create_clock` | bool | Whether the SDC contains `create_clock` |
@@ -313,16 +388,26 @@ One row per pipeline run. Key columns:
 | `timing_met` | bool | Whether all paths meet timing |
 | `no_paths` | bool | Whether STA found no timing paths (ineffective SDC) |
 | `setup_violations` | int | Count of paths with negative slack |
-| `run_dir` | path | Folder with full per-run artifacts |
+| `n_paths_total` | int | Total timing paths OpenSTA reported |
+| `n_in2reg` | int | Paths from an input port to a register (data setup) |
+| `n_reg2out` | int | Paths from a register to an output port |
+| `n_reg2reg` | int | Paths between registers (timed by `create_clock` alone) |
+| `n_in2out` | int | Pure combinational input→output paths |
+| `n_async` | int | Reset recovery/removal checks |
+| `wns_in2reg` | float | Worst slack among in2reg paths (blank if none timed) |
+| `wns_reg2out` | float | Worst slack among reg2out paths (blank if none timed) |
+| `wns_reg2reg` | float | Worst slack among reg2reg paths (blank if none timed) |
+| `coverage_complete` | bool | Whether the required I/O path groups were actually analyzed |
+| `run_dir` | path | Folder with full per-run artifacts (incl. `coverage.txt`) |
 
 ---
 
 ## Future steps
 
-- Extend the correction loop to fire on `ineffective_no_paths` and
-  `timing_violation`, not just synthesis failure.
+- Extend the correction loop to fire on `partial_coverage`,
+  `ineffective_no_paths` and `timing_violation`, not just synthesis failure.
 - Run a larger statistical batch (10+ seeds per design).
-- Add an analysis script: success rate tables, error heatmaps, slack
-  distributions.
-- Compare prompt versions (`v1_base` vs. an examples-augmented `v2`).
-- Compare llm models.
+- Compare LLM models under the same prompt.
+- Explore SDC-aware synthesis (feed constraints into the mapper) so the harder
+  question — can the LLM *safely relax* timing to cut area without breaking
+  function — becomes measurable.

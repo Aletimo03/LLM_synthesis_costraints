@@ -11,7 +11,7 @@
 
 \title{LLM-Generated Synthesis Constraints\\Current Project Status}
 \author{Alessio Timofte}
-\date{May 2026}
+\date{June 2026}
 
 \begin{document}
 \maketitle
@@ -37,12 +37,12 @@ The repository is now organized around a dedicated Python package, \texttt{pipel
     \item \textbf{LLM generation} via \texttt{pipeline/llm.py}. A prompt template is filled with Verilog source and target period, then sent to a local Ollama model.
     \item \textbf{Output cleaning} removes reasoning tags, code fences, and non-SDC text, keeping only recognized constraint commands.
     \item \textbf{Synthesis} via \texttt{pipeline/synthesis.py}. Yosys reads the RTL, runs standard optimization and mapping passes, and invokes ABC with a liberty-based timing target.
-    \item \textbf{Static Timing Analysis} via \texttt{pipeline/sta.py}. OpenSTA reads the synthesized netlist and the generated SDC, then reports WNS, TNS, minimum slack, and path-level timing behavior.
+    \item \textbf{Static Timing Analysis} via \texttt{pipeline/sta.py}. OpenSTA reads the synthesized netlist and the generated SDC, then reports WNS, TNS, minimum slack, and path-level timing behavior. The STA stage now issues \emph{independent per-path-group queries} (input$\to$register, register$\to$output, register$\to$register) using \texttt{-from}/\texttt{-to} filters, so a constrained path can no longer be masked by a competing critical path at the same endpoint. This makes coverage detection reliable.
     \item \textbf{Classification} via \texttt{pipeline/classifier.py}. Each run is labeled using both tool logs and the content of the generated SDC.
     \item \textbf{Dataset logging} via \texttt{pipeline/dataset.py}. Each experiment appends one row to \texttt{results/dataset.csv}.
 \end{enumerate}
 
-An additional correction loop is already implemented. When synthesis fails in LLM mode, the failing SDC and tool error are fed back to the model to request a corrected version, up to a bounded number of retries.
+A correction loop is implemented (synthesis-failure trigger); extending it to fire on coverage/timing failures is a planned next step. The framework also supports \emph{multiple prompt versions} (\texttt{v1\_base}, \texttt{v2\_base}) and a \texttt{-{}-compare-prompts} mode that runs every prompt on each design/seed so their results can be compared directly.
 
 \section*{Toolchain and Environment}
 \begin{table}[h]
@@ -91,80 +91,55 @@ Each run records both correctness and QoR-related information. The current CSV s
     \item structural properties of the produced SDC: number of extracted commands, presence of \texttt{create\_clock}, number of input and output delay statements;
     \item synthesis metrics: success status, runtime, total cell count, chip area;
     \item timing metrics: STA success, WNS, TNS, minimum slack, timing-met flag, number of setup violations, no-paths detection;
+    \item \textbf{per-path-group coverage}: path counts and worst-slack for the in2reg, reg2out, and reg2reg groups, plus a \texttt{coverage\_complete} flag indicating whether the required input/output timing was actually analyzed;
     \item semantic classification: primary label, all labels, and a short rationale.
 \end{itemize}
 
 This is a strong design choice because it allows the project to separate several qualitatively different outcomes:
 \begin{itemize}[leftmargin=*,nosep]
-    \item fully accepted constraints,
-    \item syntactically accepted but ineffective constraints,
+    \item fully accepted constraints (full path-group coverage, timing met),
+    \item \emph{partial-coverage} constraints that pass timing only on the subset of paths that were analyzed (e.g. register-to-register only),
+    \item syntactically accepted but ineffective constraints (no timing paths at all),
     \item timing-violating constraints,
     \item synthesis or STA failures caused by bad constraint content.
 \end{itemize}
 
 \section*{Current Dataset}
-As of \textbf{May 12, 2026}, the repository already contains a first dataset snapshot in \texttt{results/dataset.csv}.
+As of \textbf{June 2026}, \texttt{results/dataset.csv} contains 60 runs: 6 reference, 36 LLM runs with the original prompt (\texttt{v1\_base}), and 18 with the revised prompt (\texttt{v2\_base}), all using \texttt{qwen3:8b}. The six reference runs complete successfully with full path-group coverage and serve as the control baseline.
+
+The central result is the comparison between the two prompt versions:
 
 \begin{table}[h]
 \centering
 \begin{tabular}{lrr}
 \toprule
-\textbf{Run category} & \textbf{Count} & \textbf{Share} \\
+\textbf{Final status} & \textbf{v1\_base (36)} & \textbf{v2\_base (18)} \\
 \midrule
-Reference runs & 6 & 25.0\% \\
-LLM-generated runs & 18 & 75.0\% \\
-% Total recorded runs & 24 & 100.0\% \\
+ok (full coverage, timing met) & 0 & 18 \\
+partial\_coverage              & 20 & 0 \\
+ineffective\_no\_paths         & 9 & 0 \\
+timing\_violation              & 3 & 0 \\
+sta\_failed                    & 4 & 0 \\
+\midrule
+\textbf{success rate} & \textbf{0\%} & \textbf{100\%} \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-The six reference runs all completed successfully and provide a clean control baseline for every current design.
+Under \texttt{v1\_base}, \emph{not one} run achieved full coverage. The dominant failure was \emph{partial\_coverage}: the tools ran and reported clean timing, but only on register-to-register paths, because the generated SDC omitted the \texttt{-clock} association required for \texttt{set\_input\_delay} / \texttt{set\_output\_delay} to take effect. Since register-to-register paths are timed by \texttt{create\_clock} alone, they essentially cannot fail --- so naive ``tool acceptance'' badly overstated success. This is the project's key methodological finding: \textbf{tool acceptance alone is not a valid success criterion; path-group coverage must be verified}.
 
-For the 18 LLM-generated runs using \texttt{qwen3:8b}, the present outcome distribution is:
-\begin{table}[h]
-\centering
-\begin{tabular}{lrr}
-\toprule
-\textbf{LLM outcome} & \textbf{Count} & \textbf{Share of LLM runs} \\
-\midrule
-Accepted / timing met & 10 & 55.6\% \\
-Ineffective: no timing paths & 5 & 27.8\% \\
-Timing violation & 2 & 11.1\% \\
-STA failure & 1 & 5.6\% \\
-\bottomrule
-\end{tabular}
-\end{table}
+The \texttt{v2\_base} prompt adds exactly this one requirement: name the clock with \texttt{-name}, and attach \texttt{-clock} to every I/O delay. That single change lifted the success rate from 0\% to 100\%. The per-design breakdown confirms the failures were prompt-driven, not design-driven: every design that failed under \texttt{v1\_base} (including \texttt{simple} and \texttt{adder}) is fully accepted under \texttt{v2\_base}.
 
-These early results are already informative. The model frequently produces constraints that are syntactically usable and sometimes fully acceptable, but a substantial fraction remains \emph{ineffective}: the tools run, yet the constraint set fails to define a meaningful launch/capture timing relationship. This is an important finding because it shows that ``tool acceptance'' alone is not a sufficient success criterion.
-
-At the design level, the current snapshot suggests:
-\begin{itemize}[leftmargin=*,nosep]
-    \item \texttt{fsm}, \texttt{shift\_reg}, and most \texttt{counter} runs are stable and accepted;
-    \item \texttt{adder} is more fragile, showing both ineffective and timing-violating outcomes;
-    \item \texttt{simple} consistently produces ineffective constraints under the current prompt/model setup;
-    \item \texttt{alu} is mostly successful but not perfectly stable across seeds.
-\end{itemize}
-
-More importantly, the present results already expose non-trivial behavior. The LLM does not simply fail or succeed but it produces a spectrum of outcomes ranging from acceptable constraints to misleadingly valid but ineffective ones.
+\paragraph{QoR is fixed by construction.} A netlist-invariance check confirms cell count and chip area are identical to the reference for all runs. This is expected: synthesis is driven only by the clock period, so the SDC's I/O delays cannot change the circuit --- only its timing analysis. Per-group worst-slack comparisons show \texttt{v2\_base} reproduces the reference's slacks exactly (e.g. \texttt{adder} in2reg $+3.72$, reg2out $+4.42$ for both).
 
 \section*{Next Steps}
-The most valuable next improvements are now experimental rather than infrastructural:
+With the coverage methodology now solid and the prompt-comparison result established, the most valuable next steps are:
 \begin{enumerate}[leftmargin=*,nosep]
+    \item extend the correction loop to fire on \texttt{partial\_coverage} and \texttt{timing\_violation}, not just synthesis failure, and quantify whether retry-based self-repair lifts \texttt{v1\_base} toward \texttt{v2\_base};
     \item expand the benchmark set with designs that stress multiple clocks, generated clocks, and more complex timing interfaces;
-    \item compare multiple Ollama-served models and prompt versions instead of a single default configuration;
-    \item quantify the correction loop separately to measure whether retry-based self-repair materially improves acceptance rate;
-    \item add analysis scripts or plots for success rate, label frequency, and QoR deviation against the reference baseline;
-    \item refine prompts to reduce the ``no timing paths'' failure mode, which is currently one of the most important weaknesses.
+    \item compare multiple Ollama-served models under the same prompt;
+    \item explore SDC-aware synthesis (feeding constraints into the mapper) so the more demanding question --- can the LLM \emph{safely relax} timing to reduce area without breaking function --- becomes measurable;
+    \item add plots for success rate, coverage, and per-group slack distributions.
 \end{enumerate}
-\subsection*{A note on coverage completeness}
-The ten runs currently labeled \emph{accepted} must be interpreted with care.
-Post-hoc inspection of the OpenSTA logs reveals that every one of them was
-analyzed exclusively on register-to-register paths: the input-to-register and
-register-to-output path groups were entirely absent, because the generated SDC
-omitted the \texttt{-clock} association required for \texttt{set\_input\_delay}
-and \texttt{set\_output\_delay} to take effect.
-OpenSTA silently skips unconstrained ports rather than raising an error, so the
-tool reported clean timing on the only paths it could see, while the
-input and output timing environments were never exercised.
 
 \end{document}
