@@ -16,6 +16,7 @@ SYNTH_FAIL = "synthesis_failure"
 STA_FAIL = "sta_failure"
 TIMING_VIOLATION = "timing_violation"
 INEFFECTIVE = "ineffective_constraint"
+INCOMPLETE_COVERAGE = "incomplete_timing_coverage"
 ACCEPTED = "accepted"
 ACCEPTED_PARTIAL = "accepted_partial"
 
@@ -108,6 +109,9 @@ def classify(
     timing_met: bool | None,
     wns_ns: float | None,
     no_paths: bool = False,
+    coverage_complete: bool = True,
+    missing_in2reg: bool = False,
+    missing_reg2out: bool = False,
 ) -> Classification:
     labels: list[str] = []
     rationale: list[str] = []
@@ -154,22 +158,39 @@ def classify(
         labels.append(TIMING_VIOLATION)
         rationale.append(f"Timing not met (WNS={wns_ns} ns).")
 
+    # Incomplete coverage: STA passed and timing met, but the design's I/O
+    # timing environment was never fully constrained. The "pass" was only
+    # earned on the paths that happened to be analyzed (usually reg2reg only).
+    if sta_ok and not no_paths and timing_met and not coverage_complete:
+        labels.append(INCOMPLETE_COVERAGE)
+        missing = []
+        if missing_in2reg:
+            missing.append("input->register")
+        if missing_reg2out:
+            missing.append("register->output")
+        rationale.append(
+            "STA met timing but never analyzed "
+            + " and ".join(missing)
+            + " paths — I/O delays were not clock-associated, so the success is "
+              "only on the subset of paths that were timed."
+        )
+
     # Determine primary label
     if not labels:
         labels.append(ACCEPTED)
         primary = ACCEPTED
-        rationale.append("All checks passed; timing met.")
+        rationale.append("All checks passed; timing met with full path coverage.")
     else:
         # Priority order for primary
         priority = [
             EMPTY, NO_VALID_LINES, SYNTAX_ERROR, NON_NUMERIC, PORT_ERROR,
             MISSING_CLOCK, SYNTH_FAIL, STA_FAIL, TIMING_VIOLATION,
-            INEFFECTIVE, ACCEPTED_PARTIAL, ACCEPTED,
+            INEFFECTIVE, INCOMPLETE_COVERAGE, ACCEPTED_PARTIAL, ACCEPTED,
         ]
         primary = next((lbl for lbl in priority if lbl in labels), labels[0])
 
-        if synthesis_ok and sta_ok and timing_met:
-            # has minor labels (e.g., missing some delay) but works
+        if synthesis_ok and sta_ok and timing_met and coverage_complete:
+            # has minor labels (e.g., missing some delay) but works fully
             if ACCEPTED not in labels:
                 labels.append(ACCEPTED_PARTIAL)
                 primary = ACCEPTED_PARTIAL
