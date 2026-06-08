@@ -1,0 +1,20 @@
+You are generating Synopsys Design Constraints (SDC) for an ASIC synthesis flow.
+
+Verilog design:
+```
+{verilog}
+```
+
+Target clock period: {clock_period_ns} ns
+
+Requirements:
+- Output ONLY raw SDC commands, one per line.
+- The first command MUST be `create_clock` with `-name`, e.g.: `create_clock -name clk -period {clock_period_ns} [get_ports clk]`
+- Add `set_input_delay` for every non-clock input port.
+- Add `set_output_delay` for every output port.
+- Every `set_input_delay` and `set_output_delay` MUST include `-clock <clockname>`, e.g.: `set_input_delay 0.5 -clock clk [get_ports a]`
+- Use [get_ports <name>] to reference ports.
+- Use only port names that exist in the design above.
+- Do NOT include markdown, code fences, comments, or any explanation.
+- Do NOT include `<think>` or reasoning tags.
+- Do NOT include any text other than valid SDC commands.

@@ -24,7 +24,7 @@ _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from pipeline import orchestrator, config  # noqa: E402
+from pipeline import orchestrator, config, llm  # noqa: E402
 
 
 def main() -> int:
@@ -40,6 +40,12 @@ def main() -> int:
     ap.add_argument("--no-correction", action="store_true",
                     help="Disable the correction/retry loop.")
     ap.add_argument("--model", default=config.LLM_MODEL)
+    ap.add_argument("--prompt-version", default="v1_base",
+                    choices=sorted(llm.PROMPT_FILES),
+                    help="Which prompt template to use for LLM generation.")
+    ap.add_argument("--compare-prompts", action="store_true",
+                    help="Run every prompt version (v1_base and v2_base) on each "
+                         "design/seed so results can be compared side by side.")
     args = ap.parse_args()
 
     if args.all:
@@ -51,21 +57,36 @@ def main() -> int:
 
     max_corr = 0 if args.no_correction else config.MAX_CORRECTION_ATTEMPTS
 
+    # Which prompt versions to run. Reference mode ignores prompts entirely.
+    if args.reference:
+        prompt_versions = ["v1_base"]  # label is overridden to "reference" inside run_one
+    elif args.compare_prompts:
+        prompt_versions = sorted(llm.PROMPT_FILES)
+    else:
+        prompt_versions = [args.prompt_version]
+
     for design in designs:
         for seed in args.seeds:
-            print(f"\n=== {design.name}  seed={seed}  reference={args.reference} ===")
-            row = orchestrator.run_one(
-                design_path=design,
-                seed=seed,
-                target_period_ns=args.period,
-                max_corrections=max_corr,
-                use_reference_sdc=args.reference,
-                model=args.model,
-            )
-            print(f"  status={row['final_status']:>20}  primary={row['primary_label']}")
-            print(f"  cells={row['cells_total']}  area={row.get('chip_area','')}  "
-                  f"min_slack={row.get('min_slack_ns','')} ns  WNS={row['wns_ns']} ns")
-            print(f"  corrections={row['correction_attempts']}  run_dir={row['run_dir']}")
+            for pv in prompt_versions:
+                tag = "reference" if args.reference else pv
+                print(f"\n=== {design.name}  seed={seed}  prompt={tag}  "
+                      f"reference={args.reference} ===")
+                row = orchestrator.run_one(
+                    design_path=design,
+                    seed=seed,
+                    target_period_ns=args.period,
+                    max_corrections=max_corr,
+                    use_reference_sdc=args.reference,
+                    prompt_version=pv,
+                    model=args.model,
+                )
+                print(f"  status={row['final_status']:>20}  primary={row['primary_label']}")
+                print(f"  coverage_complete={row.get('coverage_complete','')}  "
+                      f"in2reg={row.get('n_in2reg','')} reg2out={row.get('n_reg2out','')} "
+                      f"reg2reg={row.get('n_reg2reg','')}")
+                print(f"  cells={row['cells_total']}  area={row.get('chip_area','')}  "
+                      f"WNS={row['wns_ns']} ns")
+                print(f"  corrections={row['correction_attempts']}  run_dir={row['run_dir']}")
 
     print(f"\nDataset: {config.DATASET_CSV}")
     return 0

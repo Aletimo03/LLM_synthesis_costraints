@@ -28,6 +28,23 @@ VALID_SDC_PREFIXES = (
 )
 
 
+# Maps the prompt_version label recorded in the dataset to its template file.
+PROMPT_FILES = {
+    "v1_base": "base_v1.txt",
+    "v2_base": "base_v2.txt",
+}
+
+
+def prompt_path_for(version: str):
+    """Resolve a prompt_version label (e.g. 'v2_base') to its template path."""
+    fname = PROMPT_FILES.get(version)
+    if fname is None:
+        raise ValueError(
+            f"Unknown prompt_version '{version}'. Known: {sorted(PROMPT_FILES)}"
+        )
+    return config.PROMPTS_DIR / fname
+
+
 @dataclass
 class LLMResult:
     raw: str

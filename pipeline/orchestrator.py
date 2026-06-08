@@ -9,6 +9,11 @@ from . import config, llm, synthesis, sta, classifier, dataset
 
 
 _TOP_PAT = re.compile(r"^\s*module\s+(\w+)\s*[\(#]", re.MULTILINE)
+_PORT_PAT = re.compile(r"^\s*(input|output)\b(.*)$")
+
+CLOCK_NAMES = {"clk", "clock", "clk_i", "i_clk"}
+# names whose timing shows up as async recovery/removal, not data setup paths
+_RESET_PAT = re.compile(r"^(rst|reset|arst|nrst)(_?n)?$|^.*_(rst|reset)(_?n)?$", re.IGNORECASE)
 
 
 def extract_top(verilog_src: str) -> str:
@@ -16,6 +21,81 @@ def extract_top(verilog_src: str) -> str:
     if not m:
         raise ValueError("Could not find a `module <name>` declaration in the Verilog source.")
     return m.group(1)
+
+
+def design_ports(verilog_src: str) -> tuple[list[str], list[str]]:
+    """Return (input_ports, output_ports) parsed from the module declaration.
+
+    Handles ANSI-style headers like `input clk,` and `output reg [15:0] sum,`.
+    Bus widths and reg/wire/logic qualifiers are stripped; only the bare port
+    identifiers are returned.
+    """
+    inputs: list[str] = []
+    outputs: list[str] = []
+    for line in verilog_src.splitlines():
+        m = _PORT_PAT.match(line)
+        if not m:
+            continue
+        kind, rest = m.group(1), m.group(2)
+        rest = rest.split("//")[0]
+        rest = re.sub(r"\b(reg|wire|logic|signed)\b", "", rest)
+        rest = re.sub(r"\[[^\]]*\]", "", rest)        # strip bus widths
+        rest = rest.replace(");", "").replace(";", "").replace(")", "")
+        names = [n.strip() for n in rest.split(",") if n.strip()]
+        names = [n for n in names if re.fullmatch(r"\w+", n)]
+        (inputs if kind == "input" else outputs).extend(names)
+    return inputs, outputs
+
+
+def expected_coverage(verilog_src: str) -> tuple[bool, bool]:
+    """What path groups *should* be timed for this design.
+
+    expect_in2reg : design has a non-clock, non-async-reset data input
+    expect_reg2out: design has at least one output port
+    """
+    inputs, outputs = design_ports(verilog_src)
+    data_inputs = [p for p in inputs
+                   if p.lower() not in CLOCK_NAMES and not _RESET_PAT.match(p)]
+    return bool(data_inputs), bool(outputs)
+
+
+def compute_coverage(verilog_src: str, sta_result) -> dict:
+    """Compare what STA actually timed against what the design requires."""
+    expect_in2reg, expect_reg2out = expected_coverage(verilog_src)
+    analyzed = bool(sta_result.ok) and not bool(sta_result.no_paths)
+    missing_in2reg = analyzed and expect_in2reg and sta_result.n_in2reg == 0
+    missing_reg2out = analyzed and expect_reg2out and sta_result.n_reg2out == 0
+    coverage_complete = analyzed and not missing_in2reg and not missing_reg2out
+    return {
+        "expect_in2reg": expect_in2reg,
+        "expect_reg2out": expect_reg2out,
+        "missing_in2reg": missing_in2reg,
+        "missing_reg2out": missing_reg2out,
+        "coverage_complete": coverage_complete,
+    }
+
+
+def compute_final_status(synth_ok: bool, sta_ok: bool, no_paths: bool,
+                         timing_met, coverage_complete: bool) -> str:
+    """Single source of truth for final_status (shared with the backfill script).
+
+    'partial_coverage' is new: STA passed and timing is met, but the I/O timing
+    environment was never fully constrained, so the 'ok' was only earned on the
+    paths that happened to be analyzed (typically reg2reg only).
+    """
+    if not synth_ok:
+        return "synth_failed"
+    if not sta_ok:
+        return "sta_failed"
+    if no_paths:
+        return "ineffective_no_paths"
+    if timing_met is False:
+        return "timing_violation"
+    if timing_met and not coverage_complete:
+        return "partial_coverage"
+    if timing_met:
+        return "ok"
+    return "sta_failed"
 
 
 def extract_clock_period(sdc: str, fallback: float) -> float:
@@ -79,7 +159,9 @@ def run_one(
         raw_sdc = cleaned_sdc
         extracted_lines = [l.strip() for l in cleaned_sdc.splitlines() if l.strip()]
     else:
-        result = llm.generate(verilog_src, target_period_ns, model=model, seed=seed)
+        prompt_path = llm.prompt_path_for(prompt_version)
+        result = llm.generate(verilog_src, target_period_ns, model=model, seed=seed,
+                              prompt_path=prompt_path)
         raw_sdc = result.raw
         cleaned_sdc = result.cleaned
         extracted_lines = result.extracted_lines
@@ -125,7 +207,10 @@ def run_one(
             errors=["synthesis_failed"], duration_s=0.0,
         )
 
-    # 5. Classify
+    # 5. Coverage: did STA time everything the design requires?
+    cov = compute_coverage(verilog_src, sta_result)
+
+    # 6. Classify
     cls = classifier.classify(
         extracted_lines=extracted_lines,
         cleaned_sdc=cleaned_sdc,
@@ -137,19 +222,19 @@ def run_one(
         timing_met=sta_result.timing_met,
         wns_ns=sta_result.wns_ns,
         no_paths=sta_result.no_paths,
+        coverage_complete=cov["coverage_complete"],
+        missing_in2reg=cov["missing_in2reg"],
+        missing_reg2out=cov["missing_reg2out"],
     )
 
-    # 6. Final status
-    if synth_result.ok and sta_result.ok and sta_result.no_paths:
-        final_status = "ineffective_no_paths"
-    elif synth_result.ok and sta_result.ok and sta_result.timing_met:
-        final_status = "ok"
-    elif synth_result.ok and sta_result.ok and sta_result.timing_met is False:
-        final_status = "timing_violation"
-    elif synth_result.ok:
-        final_status = "sta_failed"
-    else:
-        final_status = "synth_failed"
+    # 7. Final status
+    final_status = compute_final_status(
+        synth_ok=synth_result.ok,
+        sta_ok=sta_result.ok,
+        no_paths=sta_result.no_paths,
+        timing_met=sta_result.timing_met,
+        coverage_complete=cov["coverage_complete"],
+    )
 
     # 7. Record
     row = {
@@ -181,6 +266,16 @@ def run_one(
         "no_paths": sta_result.no_paths,
         "timing_met": sta_result.timing_met if sta_result.timing_met is not None else "",
         "setup_violations": sta_result.setup_violations,
+        "n_paths_total": sta_result.n_paths_total,
+        "n_in2reg": sta_result.n_in2reg,
+        "n_reg2out": sta_result.n_reg2out,
+        "n_reg2reg": sta_result.n_reg2reg,
+        "n_in2out": sta_result.n_in2out,
+        "n_async": sta_result.n_async,
+        "wns_in2reg": sta_result.wns_in2reg if sta_result.wns_in2reg is not None else "",
+        "wns_reg2out": sta_result.wns_reg2out if sta_result.wns_reg2out is not None else "",
+        "wns_reg2reg": sta_result.wns_reg2reg if sta_result.wns_reg2reg is not None else "",
+        "coverage_complete": cov["coverage_complete"],
         "rationale": "; ".join(cls.rationale),
         "run_dir": str(run_dir),
     }
