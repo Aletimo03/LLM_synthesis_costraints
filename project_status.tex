@@ -156,5 +156,15 @@ The most valuable next improvements are now experimental rather than infrastruct
     \item add analysis scripts or plots for success rate, label frequency, and QoR deviation against the reference baseline;
     \item refine prompts to reduce the ``no timing paths'' failure mode, which is currently one of the most important weaknesses.
 \end{enumerate}
+\subsection*{A note on coverage completeness}
+The ten runs currently labeled \emph{accepted} must be interpreted with care.
+Post-hoc inspection of the OpenSTA logs reveals that every one of them was
+analyzed exclusively on register-to-register paths: the input-to-register and
+register-to-output path groups were entirely absent, because the generated SDC
+omitted the \texttt{-clock} association required for \texttt{set\_input\_delay}
+and \texttt{set\_output\_delay} to take effect.
+OpenSTA silently skips unconstrained ports rather than raising an error, so the
+tool reported clean timing on the only paths it could see, while the
+input and output timing environments were never exercised.
 
 \end{document}
