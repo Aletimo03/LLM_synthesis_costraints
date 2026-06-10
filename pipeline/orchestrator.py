@@ -1,7 +1,6 @@
 """End-to-end pipeline: LLM → Yosys → OpenSTA → classify → record."""
 from __future__ import annotations
 import re
-import uuid
 import datetime
 from dataclasses import asdict
 from pathlib import Path
@@ -115,11 +114,12 @@ def _count_lines_starting(lines: list[str], prefix: str) -> int:
     return sum(1 for l in lines if l.startswith(prefix))
 
 
-def _make_run_id(design: str, seed: int | None) -> str:
+def _make_run_id(design: str, seed: int | None, prompt_version: str, reference: bool) -> str:
     ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    short = uuid.uuid4().hex[:6]
+    if reference:
+        return f"{ts}_{design}_reference"
     seed_part = f"s{seed}" if seed is not None else "noseed"
-    return f"{ts}_{design}_{seed_part}_{short}"
+    return f"{ts}_{design}_{seed_part}_{prompt_version}"
 
 
 def run_one(
@@ -141,9 +141,7 @@ def run_one(
     verilog_src = design_path.read_text()
     top = extract_top(verilog_src)
 
-    run_id = _make_run_id(design_name, seed)
-    if use_reference_sdc:
-        run_id = run_id + "_reference"
+    run_id = _make_run_id(design_name, seed, prompt_version, use_reference_sdc)
     run_dir = config.RUNS_DIR / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
 
