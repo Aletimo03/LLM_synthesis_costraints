@@ -34,15 +34,19 @@ The framework currently studies this question through four linked goals:
 The repository is now organized around a dedicated Python package, \texttt{pipeline/}, which implements the full experiment loop:
 
 \begin{enumerate}[leftmargin=*,nosep]
-    \item \textbf{LLM generation} via \texttt{pipeline/llm.py}. A prompt template is filled with Verilog source and target period, then sent to a local Ollama model.
+    \item \textbf{LLM generation} via \texttt{pipeline/llm.py}. A versioned prompt template (\texttt{v1\_base} or \texttt{v2\_base}, selected at runtime) is filled with Verilog source and target period, then sent to a local Ollama model.
     \item \textbf{Output cleaning} removes reasoning tags, code fences, and non-SDC text, keeping only recognized constraint commands.
     \item \textbf{Synthesis} via \texttt{pipeline/synthesis.py}. Yosys reads the RTL, runs standard optimization and mapping passes, and invokes ABC with a liberty-based timing target.
-    \item \textbf{Static Timing Analysis} via \texttt{pipeline/sta.py}. OpenSTA reads the synthesized netlist and the generated SDC, then reports WNS, TNS, minimum slack, and path-level timing behavior. The STA stage now issues \emph{independent per-path-group queries} (input$\to$register, register$\to$output, register$\to$register) using \texttt{-from}/\texttt{-to} filters, so a constrained path can no longer be masked by a competing critical path at the same endpoint. This makes coverage detection reliable.
+    \item \textbf{Static Timing Analysis} via \texttt{pipeline/sta.py}. OpenSTA reads the synthesized netlist and the generated SDC, then reports WNS, TNS, minimum slack, and path-level timing behavior. The STA stage issues \emph{independent per-path-group queries} (input$\to$register, register$\to$output, register$\to$register) using \texttt{-from}/\texttt{-to} filters, so a constrained path can no longer be masked by a competing critical path at the same endpoint. This makes coverage detection reliable.
     \item \textbf{Classification} via \texttt{pipeline/classifier.py}. Each run is labeled using both tool logs and the content of the generated SDC.
     \item \textbf{Dataset logging} via \texttt{pipeline/dataset.py}. Each experiment appends one row to \texttt{results/dataset.csv}.
 \end{enumerate}
 
-A correction loop is implemented (synthesis-failure trigger); extending it to fire on coverage/timing failures is a planned next step. The framework also supports \emph{multiple prompt versions} (\texttt{v1\_base}, \texttt{v2\_base}) and a \texttt{-{}-compare-prompts} mode that runs every prompt on each design/seed so their results can be compared directly.
+A correction loop is implemented (synthesis-failure trigger); extending it to fire on \texttt{partial\_coverage} and \texttt{timing\_violation} is the primary planned next step.
+
+The framework also supports \emph{multiple prompt versions} and a \texttt{-{}-compare-prompts} mode that runs every template on each design/seed so their results can be compared directly. The complete dataset can be cleanly rebuilt in one invocation using \texttt{-{}-fresh} (drops the existing CSV before the run) combined with \texttt{-{}-with-reference} (regenerates the reference baseline in the same pass).
+
+A separate utility script, \texttt{scripts/rerun\_sta.py}, replays OpenSTA on every existing run's saved netlist and SDC using the current TCL — without re-calling the LLM or Yosys. This is used whenever the STA stage or coverage parser is changed, to upgrade the dataset deterministically ($\sim$6\,s for 60 runs) rather than re-sampling the LLM.
 
 \section*{Toolchain and Environment}
 \begin{table}[h]

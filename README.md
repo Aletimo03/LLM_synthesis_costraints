@@ -47,7 +47,8 @@ LLM_synthesis_costraints/
 │   └── reference/         known-good SDC per design — used as QoR control
 │
 ├── prompts/               LLM prompt templates
-│   ├── base.txt             initial constraint generation prompt
+│   ├── base_v1.txt          original prompt (v1_base) — missing -name / -clock
+│   ├── base_v2.txt          revised prompt (v2_base) — adds -name and -clock requirements
 │   └── correction.txt       retry prompt fed with the failing SDC + tool error
 │
 ├── libs/
@@ -133,9 +134,9 @@ must be running before any LLM run, otherwise generation fails with a connection
 error.
 
 ```bash
-ollama serve            # start the daemon (or just launch the Ollama.app)
-ollama pull qwen3:8b    # download the model (one-time; served by the daemon)
-ollama list             # sanity check: qwen3:8b should appear
+ollama serve            
+ollama pull qwen3:8b    
+ollama list             
 ```
 
 `ollama serve` runs in the foreground — leave it in its own terminal, or rely on
@@ -215,21 +216,25 @@ difference:
 .venv/bin/python scripts/run_pipeline.py --design designs/adder.v --prompt-version v2_base
 ```
 
-### Full experiment in one go (reference + both prompts, 3 seeds)
+### Full experiment in one go (fresh dataset: reference + both prompts, 3 seeds)
 
 ```bash
-# 1. control baseline (no LLM, no daemon needed)
-.venv/bin/python scripts/run_pipeline.py --all --reference
+# one command rebuilds the entire dataset from scratch (needs ollama serve):
+#   --fresh           drop the old dataset.csv first
+#   --with-reference  re-run the control baseline for every design
+#   --compare-prompts run both v1_base and v2_base
+.venv/bin/python scripts/run_pipeline.py --all --seeds 1 2 3 \
+    --compare-prompts --with-reference --fresh
 
-# 2. LLM runs: every design × seeds 1-3 × {v1_base, v2_base}  (needs ollama serve)
-.venv/bin/python scripts/run_pipeline.py --all --seeds 1 2 3 --compare-prompts
-
-# 3. summary tables (status, coverage, per-group slack, v1-vs-v2)
+# then the summary tables (status, coverage, per-group slack, v1-vs-v2):
 .venv/bin/python scripts/analyze_results.py
 ```
 
-Each row is appended to `results/dataset.csv`; re-running adds more rows rather
-than overwriting, so seeds and prompt versions accumulate.
+`--fresh` deletes `results/dataset.csv` at the start so the new rows fully
+replace it — references included and updated. **Without `--fresh`, rows are
+appended** and old runs (even from previous days) accumulate. Use `--fresh` only
+on the *first* command of a session; a second `--fresh` command would wipe the
+rows the first one just wrote.
 
 ### Re-timing existing runs (no LLM re-sampling)
 
@@ -260,6 +265,8 @@ synthesis time on an unchanged netlist.
 | `--model <name>` | `qwen3:8b` | Override the Ollama model |
 | `--prompt-version <v>` | `v1_base` | Prompt template: `v1_base` or `v2_base` |
 | `--compare-prompts` | off | Run every prompt version on each design/seed for comparison |
+| `--with-reference` | off | Also run the control reference SDC once per design |
+| `--fresh` | off | Drop `dataset.csv` before this run so new rows fully replace it |
 
 ### Running in PyCharm IDE
 
@@ -282,10 +289,11 @@ synthesis time on an unchanged netlist.
       │       ◀────── correction loop on synthesis failure ────────────┘
 ```
 
-1. **LLM stage** — `pipeline/llm.py` reads `prompts/base.txt`, inserts the
-   Verilog source and target clock period, calls the local Ollama daemon,
-   strips `<think>` reasoning tags and code fences, and extracts only lines
-   beginning with valid SDC commands.
+1. **LLM stage** — `pipeline/llm.py` reads the selected prompt template
+   (`prompts/base_v1.txt` or `prompts/base_v2.txt`, controlled by
+   `--prompt-version`), inserts the Verilog source and target clock period,
+   calls the local Ollama daemon, strips `<think>` reasoning tags and code
+   fences, and extracts only lines beginning with valid SDC commands.
 
 2. **Synthesis** — `pipeline/synthesis.py` writes a Yosys script that
    reads the Verilog, runs the standard passes (proc, opt, fsm, memory,
