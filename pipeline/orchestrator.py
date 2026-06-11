@@ -2,6 +2,7 @@
 from __future__ import annotations
 import re
 import datetime
+import time
 from dataclasses import asdict
 from pathlib import Path
 from . import config, llm, synthesis, sta, classifier, dataset
@@ -114,12 +115,14 @@ def _count_lines_starting(lines: list[str], prefix: str) -> int:
     return sum(1 for l in lines if l.startswith(prefix))
 
 
-def _make_run_id(design: str, seed: int | None, prompt_version: str, reference: bool) -> str:
+def _make_run_id(design: str, seed: int | None, prompt_version: str,
+                 reference: bool, model: str) -> str:
     ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     if reference:
         return f"{ts}_{design}_reference"
     seed_part = f"s{seed}" if seed is not None else "noseed"
-    return f"{ts}_{design}_{seed_part}_{prompt_version}"
+    model_part = model.replace(":", "-").replace("/", "-")
+    return f"{ts}_{design}_{seed_part}_{prompt_version}_{model_part}"
 
 
 def run_one(
@@ -141,7 +144,7 @@ def run_one(
     verilog_src = design_path.read_text()
     top = extract_top(verilog_src)
 
-    run_id = _make_run_id(design_name, seed, prompt_version, use_reference_sdc)
+    run_id = _make_run_id(design_name, seed, prompt_version, use_reference_sdc, model)
     run_dir = config.RUNS_DIR / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
 
@@ -149,6 +152,7 @@ def run_one(
 
     # 1. Get SDC (either LLM or reference)
     correction_attempts = 0
+    llm_duration_s = 0.0  # cumulative LLM time (generation + corrections)
     if use_reference_sdc:
         ref_path = config.REFERENCE_SDC_DIR / f"{design_name}.sdc"
         if not ref_path.exists():
@@ -158,8 +162,10 @@ def run_one(
         extracted_lines = [l.strip() for l in cleaned_sdc.splitlines() if l.strip()]
     else:
         prompt_path = llm.prompt_path_for(prompt_version)
+        t0 = time.perf_counter()
         result = llm.generate(verilog_src, target_period_ns, model=model, seed=seed,
                               prompt_path=prompt_path)
+        llm_duration_s += time.perf_counter() - t0
         raw_sdc = result.raw
         cleaned_sdc = result.cleaned
         extracted_lines = result.extracted_lines
@@ -183,8 +189,10 @@ def run_one(
         correction_attempts += 1
         corr_dir = run_dir / f"correction_{correction_attempts}"
         corr_dir.mkdir(exist_ok=True)
+        t0 = time.perf_counter()
         corr = llm.correct(verilog_src, cleaned_sdc, synth_result.log,
                            clock_period_ns=target_period_ns, model=model)
+        llm_duration_s += time.perf_counter() - t0
         (corr_dir / "llm_raw.txt").write_text(corr.raw)
         if not corr.extracted_lines:
             break  # correction also failed to produce valid lines
@@ -253,6 +261,7 @@ def run_one(
         "n_input_delays": _count_lines_starting(extracted_lines, "set_input_delay"),
         "n_output_delays": _count_lines_starting(extracted_lines, "set_output_delay"),
         "synthesis_ok": synth_result.ok,
+        "llm_duration_s": round(llm_duration_s, 3),
         "synthesis_duration_s": round(synth_result.duration_s, 3),
         "cells_total": synth_result.cells if synth_result.cells is not None else "",
         "chip_area": synth_result.chip_area if synth_result.chip_area is not None else "",

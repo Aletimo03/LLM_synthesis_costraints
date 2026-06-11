@@ -220,28 +220,73 @@ def _table_netlist_invariance(refs, llm_rows: list[dict]) -> None:
                   f"area {r.get('chip_area')} vs {ref.get('chip_area')}")
 
 
+def _table_models(rows_by_model: dict[str, list[dict]]) -> None:
+    """Cross-model comparison: effectiveness and speed, per model x prompt.
+
+    Only printed when the dataset contains more than one LLM model.
+    """
+    _hr("Model Comparison  (effectiveness & speed, per model x prompt)")
+    print(f"  {'model':<16}{'prompt':<11}{'runs':>6}{'ok':>6}{'ok %':>8}"
+          f"{'full cov %':>12}{'avg llm s':>11}{'avg total s':>12}")
+    for model, rows in rows_by_model.items():
+        for v in sorted({r.get("prompt_version", "") for r in rows}):
+            vr = [r for r in rows if r.get("prompt_version") == v]
+            n_ok = sum(1 for r in vr if r["final_status"] == "ok")
+            n_cov = sum(1 for r in vr if _is_true(r.get("coverage_complete")))
+            llm_t = [_to_float(r.get("llm_duration_s")) for r in vr]
+            llm_t = [x for x in llm_t if x is not None]
+            tot_t = []
+            for r in vr:
+                parts = [_to_float(r.get(c)) for c in
+                         ("llm_duration_s", "synthesis_duration_s", "sta_duration_s")]
+                if any(p is not None for p in parts):
+                    tot_t.append(sum(p or 0.0 for p in parts))
+            avg_llm = f"{sum(llm_t)/len(llm_t):.1f}" if llm_t else "—"
+            avg_tot = f"{sum(tot_t)/len(tot_t):.1f}" if tot_t else "—"
+            print(f"  {model:<16}{v:<11}{len(vr):>6}{n_ok:>6}"
+                  f"{_pct(n_ok, len(vr)):>8}{_pct(n_cov, len(vr)):>12}"
+                  f"{avg_llm:>11}{avg_tot:>12}")
+        print()
+    print("  avg llm s   = mean LLM generation time per run (incl. corrections)")
+    print("  avg total s = mean LLM + synthesis + STA time per run")
+
+
 # --------------------------------------------------------------------------- #
 # driver
 # --------------------------------------------------------------------------- #
-def analyze(rows: list[dict], model: str) -> None:
+def analyze(rows: list[dict], model: str | None) -> None:
     refs = [r for r in rows if r.get("llm_model") == REFERENCE]
-    llm_rows = [r for r in rows if r.get("llm_model") == model]
-    versions = _prompt_versions(llm_rows)
-    by_version = {v: [r for r in llm_rows if r.get("prompt_version") == v] for v in versions}
+    if model:
+        models = [model]
+    else:
+        models = sorted({r["llm_model"] for r in rows if r.get("llm_model") != REFERENCE})
+    rows_by_model = {m: [r for r in rows if r.get("llm_model") == m] for m in models}
 
-    print(f"Model under test: {model}")
-    _table_summary(refs, by_version, len(rows))
-    _table_status(refs, by_version)
-    _table_per_design(by_version)
-    _table_coverage(by_version)
-    _table_slack(refs, by_version)
-    _table_netlist_invariance(refs, llm_rows)
+    # Per-model deep dive (prompt-version comparison within the model).
+    for m in models:
+        llm_rows = rows_by_model[m]
+        versions = _prompt_versions(llm_rows)
+        by_version = {v: [r for r in llm_rows if r.get("prompt_version") == v]
+                      for v in versions}
+        print(f"\n{'#' * 64}\n# Model under test: {m}\n{'#' * 64}")
+        _table_summary(refs, by_version, len(rows))
+        _table_status(refs, by_version)
+        _table_per_design(by_version)
+        _table_coverage(by_version)
+        _table_slack(refs, by_version)
+        _table_netlist_invariance(refs, llm_rows)
+
+    # Cross-model comparison only makes sense with >1 model.
+    if len(models) > 1:
+        _table_models(rows_by_model)
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", type=Path, default=config.DATASET_CSV)
-    parser.add_argument("--model", default="qwen3:8b")
+    parser.add_argument("--model", default=None,
+                        help="Restrict to one model; default analyzes every "
+                             "model present in the dataset.")
     args = parser.parse_args()
     analyze(_read_rows(args.dataset), model=args.model)
     return 0

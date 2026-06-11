@@ -17,6 +17,14 @@ OPENSTA_BIN = os.environ.get("OPENSTA_BIN", str(Path.home() / "tools" / "OpenSTA
 YOSYS_BIN = os.environ.get("YOSYS_BIN", "yosys")
 
 LLM_MODEL = os.environ.get("LLM_MODEL", "qwen3:8b")
+
+# Models compared by a multi-model run (run_pipeline --compare-models).
+# Override via env: LLM_MODELS="qwen3:8b,qwen3:4b,llama3.2:3b"
+LLM_MODELS = [m.strip() for m in
+              os.environ.get("LLM_MODELS",
+                             "qwen3:8b,granite4.1:3b,granite4.1:8b,gemma4:e2b,gemma4:12b"
+                             ).split(",") if m.strip()]
+
 LLM_TIMEOUT_S = 180
 
 DEFAULT_CLOCK_PERIOD_NS = 5.0

@@ -40,6 +40,10 @@ def main() -> int:
     ap.add_argument("--no-correction", action="store_true",
                     help="Disable the correction/retry loop.")
     ap.add_argument("--model", default=config.LLM_MODEL)
+    ap.add_argument("--compare-models", action="store_true",
+                    help="Run every model in config.LLM_MODELS (env LLM_MODELS, "
+                         "comma-separated) on each design/seed/prompt so models "
+                         "can be compared side by side.")
     ap.add_argument("--prompt-version", default="v1_base",
                     choices=sorted(llm.PROMPT_FILES),
                     help="Which prompt template to use for LLM generation.")
@@ -78,9 +82,13 @@ def main() -> int:
     else:
         prompt_versions = [args.prompt_version]
 
-    def _do(design, seed, pv, reference):
+    # Which models to run. Reference runs are model-independent.
+    models = config.LLM_MODELS if args.compare_models else [args.model]
+
+    def _do(design, seed, pv, reference, model):
         tag = "reference" if reference else pv
-        print(f"\n=== {design.name}  seed={seed}  prompt={tag}  reference={reference} ===")
+        print(f"\n=== {design.name}  seed={seed}  prompt={tag}  "
+              f"model={'-' if reference else model} ===")
         row = orchestrator.run_one(
             design_path=design,
             seed=seed,
@@ -88,7 +96,7 @@ def main() -> int:
             max_corrections=max_corr,
             use_reference_sdc=reference,
             prompt_version=pv,
-            model=args.model,
+            model=model,
         )
         print(f"  status={row['final_status']:>20}  primary={row['primary_label']}")
         print(f"  coverage_complete={row.get('coverage_complete','')}  "
@@ -96,16 +104,18 @@ def main() -> int:
               f"reg2reg={row.get('n_reg2reg','')}")
         print(f"  cells={row['cells_total']}  area={row.get('chip_area','')}  "
               f"WNS={row['wns_ns']} ns")
-        print(f"  corrections={row['correction_attempts']}  run_dir={row['run_dir']}")
+        print(f"  llm_time={row.get('llm_duration_s','')}s  "
+              f"corrections={row['correction_attempts']}  run_dir={row['run_dir']}")
 
-    for design in designs:
-        # Reference once per design (updated baseline) when requested and not a
-        # pure reference invocation.
-        if args.with_reference and not args.reference:
-            _do(design, None, "v1_base", reference=True)
-        for seed in args.seeds:
-            for pv in prompt_versions:
-                _do(design, seed, pv, reference=args.reference)
+    for model in models:
+        for design in designs:
+            # Reference once per design (updated baseline) when requested and not
+            # a pure reference invocation. Model-independent, so first model only.
+            if args.with_reference and not args.reference and model == models[0]:
+                _do(design, None, "v1_base", reference=True, model=model)
+            for seed in args.seeds:
+                for pv in prompt_versions:
+                    _do(design, seed, pv, reference=args.reference, model=model)
 
     print(f"\nDataset: {config.DATASET_CSV}")
     return 0

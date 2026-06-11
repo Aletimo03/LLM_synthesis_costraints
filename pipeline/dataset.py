@@ -23,6 +23,7 @@ FIELDS = [
     "n_input_delays",
     "n_output_delays",
     "synthesis_ok",
+    "llm_duration_s",
     "synthesis_duration_s",
     "cells_total",
     "chip_area",
