@@ -98,13 +98,19 @@ def generate(
     prompt_tmpl = prompt_path.read_text()
     prompt = prompt_tmpl.format(verilog=verilog_src, clock_period_ns=clock_period_ns)
 
-    options: dict = {}
+    # Disable chain-of-thought so every model is compared on equal footing (direct
+    # structured output, no reasoning). It also roughly halves qwen3:8b's runtime,
+    # and is harmless for non-reasoning models (granite) or models whose thinking is
+    # token-controlled rather than option-controlled (gemma4). Reasoning models that
+    # stream their whole answer into resp["thinking"] would otherwise leave
+    # resp["response"] empty within the generation budget — hence the fallback below.
+    options: dict = {"think": False}
     if seed is not None:
         options["seed"] = seed
         options["temperature"] = 0.8  # need variability when sampling
 
-    resp = ollama.generate(model=model, prompt=prompt, options=options or None)
-    raw = resp["response"]
+    resp = ollama.generate(model=model, prompt=prompt, options=options)
+    raw = resp.get("response") or resp.get("thinking") or ""
     cleaned, lines = clean_sdc(raw)
     return LLMResult(raw=raw, cleaned=cleaned, extracted_lines=lines)
 
@@ -124,7 +130,7 @@ def correct(
         verilog=verilog_src,
         clock_period_ns=clock_period_ns,
     )
-    resp = ollama.generate(model=model, prompt=prompt)
-    raw = resp["response"]
+    resp = ollama.generate(model=model, prompt=prompt, options={"think": False})
+    raw = resp.get("response") or resp.get("thinking") or ""
     cleaned, lines = clean_sdc(raw)
     return LLMResult(raw=raw, cleaned=cleaned, extracted_lines=lines)
