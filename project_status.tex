@@ -44,7 +44,7 @@ The repository is now organized around a dedicated Python package, \texttt{pipel
 
 A correction loop is implemented (synthesis-failure trigger); extending it to fire on \texttt{partial\_coverage} and \texttt{timing\_violation} is the primary planned next step.
 
-The framework also supports \emph{multiple prompt versions} and a \texttt{-{}-compare-prompts} mode that runs every template on each design/seed so their results can be compared directly. The complete dataset can be cleanly rebuilt in one invocation using \texttt{-{}-fresh} (drops the existing CSV before the run) combined with \texttt{-{}-with-reference} (regenerates the reference baseline in the same pass).
+The framework also supports \emph{multiple prompt versions} and \emph{multiple models}. A \texttt{-{}-compare-prompts} mode runs every prompt template on each design/seed, and a \texttt{-{}-compare-models} mode runs every model listed in \texttt{config.LLM\_MODELS} (overridable via the \texttt{LLM\_MODELS} environment variable) across the full matrix, so prompt and model effects can be compared side by side. Each run records its LLM generation time (\texttt{llm\_duration\_s}) so speed can be compared alongside accuracy. Chain-of-thought is disabled for all models so they are evaluated on equal footing. The complete dataset can be cleanly rebuilt in one invocation using \texttt{-{}-fresh} (drops the existing CSV before the run) combined with \texttt{-{}-with-reference} (regenerates the reference baseline in the same pass).
 
 A separate utility script, \texttt{scripts/rerun\_sta.py}, replays OpenSTA on every existing run's saved netlist and SDC using the current TCL — without re-calling the LLM or Yosys. This is used whenever the STA stage or coverage parser is changed, to upgrade the dataset deterministically ($\sim$6\,s for 60 runs) rather than re-sampling the LLM.
 
@@ -55,7 +55,7 @@ A separate utility script, \texttt{scripts/rerun\_sta.py}, replays OpenSTA on ev
 \toprule
 \textbf{Component} & \textbf{Current Choice} & \textbf{Role in the Project} \\
 \midrule
-Language model & Ollama + \texttt{qwen3:8b} & Local generation of SDC constraints and correction attempts \\
+Language models & Ollama (\texttt{qwen3:8b}, \texttt{granite4.1:3b/8b}, \texttt{gemma4:e2b/12b}) & Local generation of SDC constraints; compared across families and sizes \\
 Synthesis engine & Yosys 0.63 & RTL elaboration, optimization, mapping, reporting \\
 Technology mapper & ABC (via Yosys) & Liberty-aware mapping with a delay target derived from \texttt{create\_clock} \\
 Timing analyzer & OpenSTA 3.1.0 & Post-synthesis timing analysis and slack extraction \\
@@ -109,41 +109,75 @@ This is a strong design choice because it allows the project to separate several
 \end{itemize}
 
 \section*{Current Dataset}
-As of \textbf{June 2026}, \texttt{results/dataset.csv} contains 60 runs: 6 reference, 36 LLM runs with the original prompt (\texttt{v1\_base}), and 18 with the revised prompt (\texttt{v2\_base}), all using \texttt{qwen3:8b}. The six reference runs complete successfully with full path-group coverage and serve as the control baseline.
+As of \textbf{10th June 2026}, \texttt{results/dataset.csv} contains 186 runs: 6 reference plus, for each of five local models, 18 runs with the original prompt (\texttt{v1\_base}) and 18 with the revised prompt (\texttt{v2\_base}), across six designs and three seeds. The six reference runs complete successfully with full path-group coverage and serve as the control baseline. The five models span three architecture families and three size tiers: \texttt{qwen3:8b}, \texttt{granite4.1:3b}, \texttt{granite4.1:8b}, \texttt{gemma4:e2b}, and \texttt{gemma4:12b}.
 
-The central result is the comparison between the two prompt versions:
+\paragraph{The prompt effect is universal.} Across \emph{every} model, the success rate collapses to near zero under \texttt{v1\_base} and jumps to near-perfect under \texttt{v2\_base}. The single difference is that \texttt{v2\_base} requires naming the clock with \texttt{-name} and attaching \texttt{-clock} to every I/O delay. Under \texttt{v1\_base} the dominant failure is \emph{partial\_coverage}: tools report clean timing, but only on register-to-register paths, because the missing \texttt{-clock} association leaves I/O delays inert. Since register-to-register paths are timed by \texttt{create\_clock} alone and essentially cannot fail, naive ``tool acceptance'' badly overstates success. This is the project's key methodological finding: \textbf{tool acceptance alone is not a valid success criterion; path-group coverage must be verified}.
 
 \begin{table}[h]
 \centering
-\begin{tabular}{lrr}
+\begin{tabular}{lrrrr}
 \toprule
-\textbf{Final status} & \textbf{v1\_base (36)} & \textbf{v2\_base (18)} \\
+\textbf{Model} & \textbf{v1 ok\%} & \textbf{v2 ok\%} & \textbf{avg LLM s} & \textbf{family / tier} \\
 \midrule
-ok (full coverage, timing met) & 0 & 18 \\
-partial\_coverage              & 20 & 0 \\
-ineffective\_no\_paths         & 9 & 0 \\
-timing\_violation              & 3 & 0 \\
-sta\_failed                    & 4 & 0 \\
-\midrule
-\textbf{success rate} & \textbf{0\%} & \textbf{100\%} \\
+granite4.1:3b  & 0\%  & 89\%  & 2.3   & Granite / 3B \\
+granite4.1:8b  & 0\%  & 100\% & 5.4   & Granite / 8B \\
+gemma4:e2b     & 11\% & 100\% & 17.8  & Gemma / eff-2B \\
+qwen3:8b       & 0\%  & 100\% & 87.1  & Qwen / 8B \\
+gemma4:12b     & 22\% & 94\%  & 292.6 & Gemma / 12B \\
 \bottomrule
 \end{tabular}
+\caption*{\small ok\% and mean LLM generation time per run, by prompt version. avg LLM s shown for \texttt{v2\_base}.}
 \end{table}
 
-Under \texttt{v1\_base}, \emph{not one} run achieved full coverage. The dominant failure was \emph{partial\_coverage}: the tools ran and reported clean timing, but only on register-to-register paths, because the generated SDC omitted the \texttt{-clock} association required for \texttt{set\_input\_delay} / \texttt{set\_output\_delay} to take effect. Since register-to-register paths are timed by \texttt{create\_clock} alone, they essentially cannot fail --- so naive ``tool acceptance'' badly overstated success. This is the project's key methodological finding: \textbf{tool acceptance alone is not a valid success criterion; path-group coverage must be verified}.
+\paragraph{Speed varies by two orders of magnitude.} \texttt{granite4.1} generates valid SDC in 2--5\,s per run --- it is purpose-built for structured output and does not pad its answer --- versus 87\,s for \texttt{qwen3:8b} and 293\,s for \texttt{gemma4:12b}. With chain-of-thought disabled for fairness, \texttt{granite4.1:8b} reaches 100\% accuracy roughly $16\times$ faster than \texttt{qwen3:8b}. Notably, the \emph{effective-2B} \texttt{gemma4:e2b} outperforms the full \texttt{gemma4:12b} on both speed and accuracy.
 
-The \texttt{v2\_base} prompt adds exactly this one requirement: name the clock with \texttt{-name}, and attach \texttt{-clock} to every I/O delay. That single change lifted the success rate from 0\% to 100\%. The per-design breakdown confirms the failures were prompt-driven, not design-driven: every design that failed under \texttt{v1\_base} (including \texttt{simple} and \texttt{adder}) is fully accepted under \texttt{v2\_base}.
+\paragraph{Intrinsic knowledge vs.\ prompting.} Only \texttt{gemma4:12b} achieves any \texttt{ok} runs under \texttt{v1\_base} (4 of 18). Inspection shows it spontaneously emits \texttt{-name} and \texttt{-clock} without being told to --- knowledge the other models lack and only apply when the \texttt{v2\_base} prompt reminds them. This distinguishes ``the model has the knowledge'' from ``the model needs prompting to apply it,'' a capability axis beyond a simple pass/fail rate.
 
-\paragraph{QoR is fixed by construction.} A netlist-invariance check confirms cell count and chip area are identical to the reference for all runs. This is expected: synthesis is driven only by the clock period, so the SDC's I/O delays cannot change the circuit --- only its timing analysis. Per-group worst-slack comparisons show \texttt{v2\_base} reproduces the reference's slacks exactly (e.g. \texttt{adder} in2reg $+3.72$, reg2out $+4.42$ for both).
+\paragraph{Netlist invariance and per-group slack.} A netlist-invariance check confirms cell count and chip area are identical to the reference for all runs and all models. This is expected: synthesis is driven only by the clock period, so the SDC's I/O delays cannot change the circuit --- only its timing analysis. What \emph{does} vary is the worst slack per path group, which exposes each model's implicit \emph{delay-value} strategy: a smaller chosen I/O delay leaves more slack. The tables below show the worst (minimum across seeds) \texttt{v2\_base} slack per group for two representative designs. Register-to-register slack is identical everywhere (it is timed by \texttt{create\_clock} alone, independent of I/O delays), while in2reg/reg2out slack tracks the chosen delay: \texttt{qwen3:8b} matches the reference exactly ($0$\,ns delays), \texttt{granite4.1:8b} is most conservative, and the others sit in between.
+
+\begin{table}[h]
+\centering
+\begin{minipage}{0.48\textwidth}
+\centering
+\begin{tabular}{lrrr}
+\toprule
+\textbf{adder} & in2reg & reg2out & reg2reg \\
+\midrule
+reference      & $+3.72$ & $+4.42$ & --- \\
+qwen3:8b       & $+3.72$ & $+4.42$ & --- \\
+granite4.1:3b  & $+3.22$ & $+3.92$ & --- \\
+granite4.1:8b  & $+2.22$ & $+2.92$ & --- \\
+gemma4:e2b     & $+3.22$ & $+3.92$ & --- \\
+gemma4:12b     & $+3.22$ & $+3.92$ & --- \\
+\bottomrule
+\end{tabular}
+\end{minipage}\hfill
+\begin{minipage}{0.48\textwidth}
+\centering
+\begin{tabular}{lrrr}
+\toprule
+\textbf{counter} & in2reg & reg2out & reg2reg \\
+\midrule
+reference      & $+4.27$ & $+4.39$ & $+4.66$ \\
+qwen3:8b       & $+4.27$ & $+4.39$ & $+4.66$ \\
+granite4.1:3b  & $+3.05$ & $+2.89$ & $+4.66$ \\
+granite4.1:8b  & $+4.27$ & $+4.39$ & $+4.66$ \\
+gemma4:e2b     & $+3.77$ & $+3.89$ & $+4.66$ \\
+gemma4:12b     & $+3.77$ & $+3.89$ & $+4.66$ \\
+\bottomrule
+\end{tabular}
+\end{minipage}
+\caption*{\small Worst \texttt{v2\_base} slack (ns) per path group; ``---'' = group not present in the design.}
+\end{table}
 
 \section*{Next Steps}
-With the coverage methodology now solid and the prompt-comparison result established, the most valuable next steps are:
+With the coverage methodology solid and a five-model comparison established, the most valuable next steps are:
 \begin{enumerate}[leftmargin=*,nosep]
+    \item expand the benchmark set with designs that stress multiple clocks, generated clocks, false/multicycle paths, and more complex timing interfaces;
     \item extend the correction loop to fire on \texttt{partial\_coverage} and \texttt{timing\_violation}, not just synthesis failure, and quantify whether retry-based self-repair lifts \texttt{v1\_base} toward \texttt{v2\_base};
-    \item expand the benchmark set with designs that stress multiple clocks, generated clocks, and more complex timing interfaces;
-    \item compare multiple Ollama-served models under the same prompt;
+    \item run more seeds (5--10) on the fastest accurate models (\texttt{granite4.1:8b}, \texttt{gemma4:e2b}) to confirm the 100\% is robust;
     \item explore SDC-aware synthesis (feeding constraints into the mapper) so the more demanding question --- can the LLM \emph{safely relax} timing to reduce area without breaking function --- becomes measurable;
-    \item add plots for success rate, coverage, and per-group slack distributions.
+    \item add plots for success rate, coverage, speed, and per-group slack distributions.
 \end{enumerate}
 
 \end{document}

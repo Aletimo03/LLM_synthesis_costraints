@@ -87,8 +87,8 @@ LLM_synthesis_costraints/
 | Tool | Version (M1/M4 Mac) | Role |
 |---|---|---|
 | **Python** | 3.11 | Pipeline language |
-| **Ollama** | local daemon | Serves the LLM |
-| **Qwen3** | `qwen3:8b` (5.2 GB) | The local LLM that produces SDC |
+| **Ollama** | local daemon | Serves the LLMs |
+| **Models** | `qwen3:8b`, `granite4.1:3b/8b`, `gemma4:e2b/12b` | Local LLMs compared across families & sizes (set in `LLM_MODELS`) |
 | **Yosys** | 0.63 | Verilog → gate-level synthesis |
 | **ABC** | bundled with Yosys | Timing-driven technology mapping |
 | **OpenSTA** | 3.1.0 (built from source) | Static Timing Analysis (WNS, TNS, slack) |
@@ -226,7 +226,12 @@ difference:
 .venv/bin/python scripts/run_pipeline.py --all --seeds 1 2 3 \
     --compare-prompts --with-reference --fresh
 
-# then the summary tables (status, coverage, per-group slack, v1-vs-v2):
+# multi-model version: every model in LLM_MODELS runs the full matrix
+# (reference is model-independent, so it runs once, on the first pass)
+LLM_MODELS="qwen3:8b,qwen3:4b" .venv/bin/python scripts/run_pipeline.py \
+    --all --seeds 1 2 3 --compare-prompts --with-reference --fresh --compare-models
+
+# then the summary tables (per-model deep dive + cross-model comparison):
 .venv/bin/python scripts/analyze_results.py
 ```
 
@@ -263,6 +268,7 @@ synthesis time on an unchanged netlist.
 | `--reference` | off | Skip LLM, use `designs/reference/<name>.sdc` |
 | `--no-correction` | off | Disable the LLM correction/retry loop |
 | `--model <name>` | `qwen3:8b` | Override the Ollama model |
+| `--compare-models` | off | Run every model in `LLM_MODELS` (config/env) on each design/seed/prompt |
 | `--prompt-version <v>` | `v1_base` | Prompt template: `v1_base` or `v2_base` |
 | `--compare-prompts` | off | Run every prompt version on each design/seed for comparison |
 | `--with-reference` | off | Also run the control reference SDC once per design |
@@ -362,7 +368,8 @@ Most things can also be overridden via environment variables:
 |---|---|---|
 | `OPENSTA_BIN` | `~/tools/OpenSTA/build/sta` | Path to the OpenSTA binary |
 | `YOSYS_BIN` | `yosys` (PATH) | Path to Yosys |
-| `LLM_MODEL` | `qwen3:8b` | Ollama model name |
+| `LLM_MODEL` | `qwen3:8b` | Ollama model name (single-model runs) |
+| `LLM_MODELS` | `qwen3:8b` | Comma-separated model list for `--compare-models`, e.g. `qwen3:8b,qwen3:4b` |
 
 Constants tuned in `config.py`:
 
@@ -389,6 +396,7 @@ One row per pipeline run. Key columns:
 | `all_labels` | str | `\|`-separated list of all matched labels |
 | `has_create_clock` | bool | Whether the SDC contains `create_clock` |
 | `n_input_delays` / `n_output_delays` | int | Counts of those SDC commands |
+| `llm_duration_s` | float | LLM generation time, incl. correction retries (0 for reference) |
 | `cells_total` | int | Synthesized cell count |
 | `chip_area` | float | Total area (Nangate45 units) |
 | `wns_ns` / `tns_ns` | float | Worst / total negative slack |
@@ -410,12 +418,56 @@ One row per pipeline run. Key columns:
 
 ---
 
+## Results so far
+
+As of June 2026 the dataset holds 186 runs (6 reference + 5 models × 36). The
+headline findings:
+
+- **The prompt fix is universal.** Every model collapses to ~0% success on
+  `v1_base` and jumps to 89–100% on `v2_base`. The only difference is `v2_base`
+  requiring `-name` on the clock and `-clock` on every I/O delay. Without it,
+  runs land in `partial_coverage` (clean timing, but only on reg2reg paths) —
+  confirming **tool acceptance alone is not a valid success criterion**.
+- **Speed spans two orders of magnitude** (v2_base, mean LLM time per run):
+
+  | Model | v2 ok% | avg LLM s |
+  |---|---|---|
+  | `granite4.1:8b` | 100% | 5.4 |
+  | `granite4.1:3b` | 89% | 2.3 |
+  | `gemma4:e2b` | 100% | 17.8 |
+  | `qwen3:8b` | 100% | 87.1 |
+  | `gemma4:12b` | 94% | 292.6 |
+
+  Granite (built for structured output) reaches 100% ~16× faster than qwen3:8b.
+  The *effective-2B* `gemma4:e2b` beats the full `gemma4:12b` on both axes.
+- **Intrinsic knowledge vs. prompting.** Only `gemma4:12b` gets any `ok` runs on
+  `v1_base` — it spontaneously writes `-name`/`-clock` unprompted. The others
+  only do so when `v2_base` reminds them.
+
+**Netlist invariance and per-group slack.** Cells/area match the reference for
+every run because synthesis is currently driven only by the clock period — the
+SDC's I/O delays cannot change the circuit, only its timing analysis (feeding
+constraints into the mapper is a future step, see below). What *does* vary is the
+worst slack per path group, which exposes each model's chosen I/O delay (smaller
+delay → more slack). `reg2reg` is identical everywhere (timed by `create_clock`
+alone); `in2reg`/`reg2out` track the delay choice — `qwen3:8b` matches the
+reference exactly (0 ns delays), `granite4.1:8b` is the most conservative:
+
+  | adder (v2) | in2reg | reg2out | counter (v2) | in2reg | reg2out | reg2reg |
+  |---|---|---|---|---|---|---|
+  | reference | +3.72 | +4.42 | reference | +4.27 | +4.39 | +4.66 |
+  | qwen3:8b | +3.72 | +4.42 | qwen3:8b | +4.27 | +4.39 | +4.66 |
+  | granite4.1:3b | +3.22 | +3.92 | granite4.1:3b | +3.05 | +2.89 | +4.66 |
+  | granite4.1:8b | +2.22 | +2.92 | granite4.1:8b | +4.27 | +4.39 | +4.66 |
+  | gemma4:e2b | +3.22 | +3.92 | gemma4:e2b | +3.77 | +3.89 | +4.66 |
+  | gemma4:12b | +3.22 | +3.92 | gemma4:12b | +3.77 | +3.89 | +4.66 |
+
 ## Future steps
 
 - Extend the correction loop to fire on `partial_coverage`,
   `ineffective_no_paths` and `timing_violation`, not just synthesis failure.
-- Run a larger statistical batch (10+ seeds per design).
-- Compare LLM models under the same prompt.
+- Add harder designs (multiple clocks, generated clocks, false/multicycle paths).
+- Run a larger statistical batch (5–10+ seeds) on the fastest accurate models.
 - Explore SDC-aware synthesis (feed constraints into the mapper) so the harder
   question — can the LLM *safely relax* timing to cut area without breaking
   function — becomes measurable.
