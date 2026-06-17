@@ -16,6 +16,16 @@ CLOCK_NAMES = {"clk", "clock", "clk_i", "i_clk"}
 _RESET_PAT = re.compile(r"^(rst|reset|arst|nrst)(_?n)?$|^.*_(rst|reset)(_?n)?$", re.IGNORECASE)
 
 
+def _is_clock_port(name: str) -> bool:
+    """A port is a clock if it is a known clock name or contains clk/clock.
+
+    Generalizes the fixed CLOCK_NAMES set so multi-clock designs (clk_a, clk_b,
+    wr_clk, ...) are not mistaken for data inputs in the coverage check.
+    """
+    n = name.lower()
+    return n in CLOCK_NAMES or "clk" in n or "clock" in n
+
+
 def extract_top(verilog_src: str) -> str:
     m = _TOP_PAT.search(verilog_src)
     if not m:
@@ -55,7 +65,7 @@ def expected_coverage(verilog_src: str) -> tuple[bool, bool]:
     """
     inputs, outputs = design_ports(verilog_src)
     data_inputs = [p for p in inputs
-                   if p.lower() not in CLOCK_NAMES and not _RESET_PAT.match(p)]
+                   if not _is_clock_port(p) and not _RESET_PAT.match(p)]
     return bool(data_inputs), bool(outputs)
 
 

@@ -87,12 +87,15 @@ def main() -> int:
 
     def _do(design, seed, pv, reference, model):
         tag = "reference" if reference else pv
+        # Per-design period override (e.g. mult_mcp needs a tight period for the
+        # multicycle exception to matter); falls back to the CLI --period.
+        period = config.DESIGN_PERIODS.get(design.stem, args.period)
         print(f"\n=== {design.name}  seed={seed}  prompt={tag}  "
-              f"model={'-' if reference else model} ===")
+              f"model={'-' if reference else model}  period={period}ns ===")
         row = orchestrator.run_one(
             design_path=design,
             seed=seed,
-            target_period_ns=args.period,
+            target_period_ns=period,
             max_corrections=max_corr,
             use_reference_sdc=reference,
             prompt_version=pv,
