@@ -1,0 +1,7 @@
+create_clock -name clk -period 1.5 [get_ports clk]
+set_false_path -from [get_ports rst_n]
+set_input_delay 0.5 -clock clk [get_ports a]
+set_input_delay 0.5 -clock clk [get_ports b]
+set_input_delay 0.5 -clock clk [get_ports valid]
+set_output_delay 0.5 -clock clk [get_ports product]
+set_multicycle_path 2 -setup -from [all_registers] -to [all_registers]
