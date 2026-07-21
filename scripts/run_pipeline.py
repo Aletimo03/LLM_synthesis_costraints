@@ -39,6 +39,9 @@ def main() -> int:
                     help="Use designs/reference/<name>.sdc instead of the LLM (control run).")
     ap.add_argument("--no-correction", action="store_true",
                     help="Disable the correction/retry loop.")
+    ap.add_argument("--max-corrections", type=int, default=None,
+                    help="Correction-ladder depth (default: config value; "
+                         "1 = error only, 2 = + object dictionary).")
     ap.add_argument("--model", default=config.LLM_MODEL)
     ap.add_argument("--compare-models", action="store_true",
                     help="Run every model in config.LLM_MODELS (env LLM_MODELS, "
@@ -66,7 +69,12 @@ def main() -> int:
     else:
         ap.error("Provide --design <path> or --all.")
 
-    max_corr = 0 if args.no_correction else config.MAX_CORRECTION_ATTEMPTS
+    if args.no_correction:
+        max_corr = 0
+    elif args.max_corrections is not None:
+        max_corr = max(0, args.max_corrections)
+    else:
+        max_corr = config.MAX_CORRECTION_ATTEMPTS
 
     # Start from a clean dataset if requested (so the whole invocation forms it).
     if args.fresh and config.DATASET_CSV.exists():
@@ -90,18 +98,29 @@ def main() -> int:
         # Per-design period override (e.g. mult_mcp needs a tight period for the
         # multicycle exception to matter); falls back to the CLI --period.
         period = config.DESIGN_PERIODS.get(design.stem, args.period)
+        # Correction is spent only on the prompt versions where a failure means a
+        # real capability gap (config.CORRECTION_PROMPT_VERSIONS); other versions
+        # still run, they just do not get a retry.
+        corr_budget = max_corr if pv in config.CORRECTION_PROMPT_VERSIONS else 0
         print(f"\n=== {design.name}  seed={seed}  prompt={tag}  "
-              f"model={'-' if reference else model}  period={period}ns ===")
+              f"model={'-' if reference else model}  period={period}ns"
+              f"{'' if corr_budget else '  (no correction)'} ===")
         row = orchestrator.run_one(
             design_path=design,
             seed=seed,
             target_period_ns=period,
-            max_corrections=max_corr,
+            max_corrections=corr_budget,
             use_reference_sdc=reference,
             prompt_version=pv,
             model=model,
         )
-        print(f"  status={row['final_status']:>20}  primary={row['primary_label']}")
+        # Show the full ladder path when the correction loop fired.
+        status = row["final_status"]
+        if row.get("correction_attempts"):
+            status = row.get("correction_path") or f"{row.get('initial_status', '?')}>{status}"
+            if row.get("corrected"):
+                status += "  [FIXED@level{}]".format(row["correction_attempts"])
+        print(f"  status={status}  primary={row['primary_label']}")
         print(f"  coverage_complete={row.get('coverage_complete','')}  "
               f"in2reg={row.get('n_in2reg','')} reg2out={row.get('n_reg2out','')} "
               f"reg2reg={row.get('n_reg2reg','')}")
