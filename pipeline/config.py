@@ -38,7 +38,21 @@ DESIGN_PERIODS = {
     "mult_mcp": 1.5,
 }
 
-MAX_CORRECTION_ATTEMPTS = 3
+# Depth of the correction ladder (retries after a non-ok run). Each level feeds
+# progressively stronger help (see orchestrator.correction_guidance):
+#   1 = the tool's error plus the model's own previous SDC
+#   2 = + the object dictionary (real port/net names, [all_registers], and the
+#       fact that RTL pin names do not survive synthesis)
+# The level at which a run is repaired is the diagnosis: a repair at 1 was a
+# robustness slip, at 2 a namespace limitation, never = a deeper gap.
+# At this depth nothing derived from the reference SDC ever reaches the model.
+MAX_CORRECTION_ATTEMPTS = 2
+
+# Prompt versions whose failures get a correction retry. Generation runs on
+# every version, but correcting v1 would mostly re-measure the missing
+# -name/-clock scaffold that v2 already fixes, so the retry budget is spent
+# where the failures are real capability gaps.
+CORRECTION_PROMPT_VERSIONS = {"v2_base"}
 
 for d in (RUNS_DIR, RESULTS_DIR, REFERENCE_SDC_DIR):
     d.mkdir(parents=True, exist_ok=True)
