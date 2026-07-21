@@ -1,11 +1,11 @@
-Your previous SDC constraints failed.
+Your previous SDC constraints did not fully succeed.
 
 Previous SDC:
 ```
 {previous_sdc}
 ```
 
-Error from the tool:
+What went wrong:
 ```
 {error_message}
 ```
@@ -17,5 +17,12 @@ Verilog design (for reference):
 
 Target clock period: {clock_period_ns} ns
 
-Fix the SDC so it passes. Output ONLY corrected SDC commands, one per line.
-No markdown, no comments, no explanation, no reasoning tags.
+Fix the SDC. Follow these rules strictly:
+- Change as little as possible: keep every line that is not implicated by the
+  problem exactly as it is.
+- Do not add new commands unless the problem clearly requires one.
+- Do not invent command options or query functions; use only standard SDC.
+- Port names must match the Verilog module header exactly.
+
+Output the FULL corrected SDC, one command per line. No markdown, no comments,
+no explanation, no reasoning tags.
