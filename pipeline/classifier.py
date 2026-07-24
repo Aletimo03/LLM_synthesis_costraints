@@ -50,11 +50,25 @@ def _detect_syntax_error(log: str) -> bool:
         r"wrong\s+#\s*args",
         r"bad\s+option",
         r"invalid\s+value",
+        # OpenSTA's own wording for a hallucinated flag or wrong arity; none of
+        # the generic patterns above match it, so without these two every
+        # invented option (-edge, -relative, -add_shift, ...) went unlabelled.
+        r"is\s+not\s+a\s+known\s+keyword\s+or\s+flag",
+        r"requires\s+(one|two|\d+)\s+positional\s+argument",
     ]
     return any(re.search(p, log, re.IGNORECASE) for p in patterns)
 
 
 _NUMERIC = re.compile(r"^-?\d+(\.\d+)?([eE][+-]?\d+)?$")
+
+
+_DELAY_CMDS = ("set_input_delay", "set_output_delay", "set_max_delay", "set_min_delay")
+
+# OpenSTA accepts a bare port name as an object (e.g. `set_input_delay 0.5 -clock
+# clk q`), so an unbracketed port is NOT a defect -- runs using that form reach
+# status=ok with full coverage. Only lines that DO carry a [ ... ] collection can
+# have a stray non-numeric token in the value slot; see _detect_non_numeric.
+_OBJ_SPEC = re.compile(r"\[[^\]]*\]")
 
 
 def _detect_non_numeric(sdc: str) -> bool:
@@ -64,14 +78,17 @@ def _detect_non_numeric(sdc: str) -> bool:
     bare (non-flag) numeric token, e.g.:
         set_input_delay -max 2.0 -clock clk [get_ports a]
         set_output_delay 0.5 -clock clk [get_ports y]
+
+    Lines with no [ ... ] object spec are skipped: there the stray bare token is
+    the unbracketed port itself (see _detect_malformed_object), not a value.
     """
     for line in sdc.splitlines():
         m = re.search(r"-period\s+(\S+)", line)
         if m and not _NUMERIC.match(m.group(1)):
             return True
 
-        if line.lstrip().startswith(("set_input_delay", "set_output_delay",
-                                     "set_max_delay", "set_min_delay")):
+        if (line.lstrip().startswith(_DELAY_CMDS)
+                and _OBJ_SPEC.search(line)):
             # Tokenize, skip the command, skip flags and their string values.
             tokens = line.split()[1:]
             i = 0
