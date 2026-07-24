@@ -1,5 +1,9 @@
 """Replay OpenSTA on every existing run and rebuild the dataset.
 
+NOTE: for a run whose correction loop fired, the recorded columns describe the
+LAST attempt, so this script re-times that attempt's artifacts (see
+_attempt_dir), not the first-shot SDC.
+
 Unlike backfill_paths.py (which only re-parses the old sta.log), this script
 re-runs OpenSTA on each run's saved netlist + generated.sdc using the current
 TCL — the one with independent per-group `-from`/`-to` queries. That regenerates
@@ -40,8 +44,29 @@ def _find_netlist(run_dir: Path) -> Path | None:
     return vs[0] if vs else None
 
 
-def rerun_row(row: dict) -> dict:
+def _attempt_dir(row: dict) -> Path:
+    """The directory holding the attempt this row's columns actually describe.
+
+    A corrected run evaluates each attempt in its own correction_<n>/ folder, and
+    the recorded metrics come from the LAST one. Re-timing run_dir/generated.sdc
+    for such a row would silently replace the final verdict with attempt 0's,
+    while correction_path and corrected still claim the later trajectory --
+    leaving the row internally contradictory.
+    """
     run_dir = Path(row["run_dir"])
+    try:
+        n = int(row.get("correction_attempts") or 0)
+    except ValueError:
+        n = 0
+    if n > 0:
+        attempt = run_dir / f"correction_{n}"
+        if (attempt / "generated.sdc").exists():
+            return attempt
+    return run_dir
+
+
+def rerun_row(row: dict) -> dict:
+    run_dir = _attempt_dir(row)
     sdc = run_dir / "generated.sdc"
     netlist = _find_netlist(run_dir)
     synthesis_ok = _as_bool(row.get("synthesis_ok", ""))
