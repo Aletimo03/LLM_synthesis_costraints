@@ -4,14 +4,15 @@
 \usepackage{lmodern}
 \usepackage{microtype}
 \usepackage{booktabs}
+\usepackage{caption}   % provides \caption* (unnumbered caption) used in the tables
 \usepackage{tabularx}
 \usepackage{array}
 \usepackage{enumitem}
 \usepackage[hidelinks]{hyperref}
 
-\title{LLM-Generated Synthesis Constraints\\Current Project Status}
+\title{LLM-Generated Synthesis Constraints\\Validation, Coverage and Self-Repair}
 \author{Alessio Timofte}
-\date{June 2026}
+\date{July 2026}
 
 \begin{document}
 \maketitle
@@ -19,7 +20,7 @@
 \section*{Research Objective}
 The core question is:
 \begin{quote}
-Can a (local) LLM generate synthesis constraints that are correct enough to support ASIC-style synthesis and timing analysis, and how often do those constraints preserve useful QoR relative to a reference baseline?
+Can an LLM generate synthesis constraints that are correct enough to support ASIC-style synthesis and timing analysis --- and, when the tools reject or under-cover them, can it repair its own output?
 \end{quote}
 
 The framework currently studies this question through four linked goals:
@@ -27,7 +28,8 @@ The framework currently studies this question through four linked goals:
     \item generate SDC constraints from RTL plus a target clock period,
     \item validate the constraints through a real synthesis and STA flow,
     \item classify the resulting behavior into meaningful failure or success labels,
-    \item compare LLM-generated runs against trusted reference constraints.
+    \item compare LLM-generated runs against trusted reference constraints,
+    \item feed the tools' own diagnostics back to the model and measure whether it repairs, stalls, or regresses.
 \end{enumerate}
 
 \section*{Current Architecture}
@@ -42,11 +44,13 @@ The repository is now organized around a dedicated Python package, \texttt{pipel
     \item \textbf{Dataset logging} via \texttt{pipeline/dataset.py}. Each experiment appends one row to \texttt{results/dataset.csv}.
 \end{enumerate}
 
-A correction loop is implemented (synthesis-failure trigger); extending it to fire on \texttt{partial\_coverage} and \texttt{timing\_violation} is the primary planned next step.
+A \textbf{correction ladder} runs after classification and fires on any \texttt{final\_status} $\neq$ \texttt{ok}, escalating through up to two levels that re-feed the latest SDC and its error with cumulatively stronger help. Level~1 gives the tool's own error together with the model's previous SDC (the tool's complaints where a tool objected; a precise derived statement --- which ports went untimed, which path group violates --- where the tools stay silent). Level~2 adds an object dictionary: the design's real port and net names, \texttt{[all\_registers]}, and the fact that RTL-level pin names do not survive synthesis. The level at which a run is repaired is itself the diagnosis --- a repair at level~1 was a robustness slip, at level~2 a namespace limitation, and a run that is never repaired points to a deeper gap. Because the dictionary is drawn from the design's own Verilog, which the model already sees, \textbf{nothing derived from the reference SDC ever reaches the model}: the ladder measures self-repair rather than hint-following. The retry budget is spent only on \texttt{v2\_base} failures, since \texttt{v1\_base} failures mostly re-measure the missing \texttt{-name}/\texttt{-clock} scaffold that \texttt{v2\_base} already fixes. The correction prompt enforces minimal edits (keep working lines identical, add nothing unless required), a rule motivated by a first symptom-only sweep in which repairs were overwhelmingly small edits while failed corrections expanded the SDC and broke previously working syntax. Each level is evaluated in its own \texttt{correction\_<n>/} directory, and the columns \texttt{initial\_status}, \texttt{correction\_path}, \texttt{corrected}, \texttt{best\_status} and \texttt{final\_status} make the full trajectory measurable.
 
-The framework also supports \emph{multiple prompt versions} and \emph{multiple models}. A \texttt{-{}-compare-prompts} mode runs every prompt template on each design/seed, and a \texttt{-{}-compare-models} mode runs every model listed in \texttt{config.LLM\_MODELS} (overridable via the \texttt{LLM\_MODELS} environment variable) across the full matrix, so prompt and model effects can be compared side by side. Each run records its LLM generation time (\texttt{llm\_duration\_s}) so speed can be compared alongside accuracy. Chain-of-thought is disabled for all models so they are evaluated on equal footing. The complete dataset can be cleanly rebuilt in one invocation using \texttt{-{}-fresh} (drops the existing CSV before the run) combined with \texttt{-{}-with-reference} (regenerates the reference baseline in the same pass).
+Its placement matters. An earlier version of this loop was triggered by a \emph{synthesis} failure and sat between the synthesis call and the STA stage; it never fired once, because the SDC is not an input to Yosys (a bad constraint therefore cannot break synthesis, and \texttt{synth\_failed} is $0$ across every run recorded here) and because none of the verdicts that do occur have been computed at that point in the flow. Relocating the retry after classification, rather than merely widening its condition, is what makes it reachable at all.
 
-A separate utility script, \texttt{scripts/rerun\_sta.py}, replays OpenSTA on every existing run's saved netlist and SDC using the current TCL — without re-calling the LLM or Yosys. This is used whenever the STA stage or coverage parser is changed, to upgrade the dataset deterministically ($\sim$6\,s for 60 runs) rather than re-sampling the LLM.
+The framework also supports \emph{multiple prompt versions} and \emph{multiple models}. A \texttt{-{}-compare-prompts} mode runs every prompt template on each design/seed, and a \texttt{-{}-compare-models} mode runs every model listed in \texttt{config.LLM\_MODELS} (overridable via the \texttt{LLM\_MODELS} environment variable) across the full matrix, so prompt and model effects can be compared side by side. Each run records first-shot generation time and correction time separately (\texttt{llm\_duration\_s}, \texttt{llm\_correction\_s}) so model speed stays comparable no matter how often the retry fires. Chain-of-thought is disabled for all models so they are evaluated on equal footing. The complete dataset can be cleanly rebuilt in one invocation using \texttt{-{}-fresh} (drops the existing CSV before the run) combined with \texttt{-{}-with-reference} (regenerates the reference baseline in the same pass).
+
+A separate utility script, \texttt{scripts/rerun\_sta.py}, replays OpenSTA on every existing run's saved netlist and SDC using the current TCL — without re-calling the LLM or Yosys. This is used whenever the STA stage or coverage parser is changed, to upgrade the dataset deterministically ($\sim$0.1\,s per run, so about a minute for the full dataset) rather than re-sampling the LLM.
 
 \section*{Toolchain and Environment}
 \begin{table}[h]
@@ -55,7 +59,8 @@ A separate utility script, \texttt{scripts/rerun\_sta.py}, replays OpenSTA on ev
 \toprule
 \textbf{Component} & \textbf{Current Choice} & \textbf{Role in the Project} \\
 \midrule
-Language models & Ollama (\texttt{qwen3:8b}, \texttt{granite4.1:3b/8b}, \texttt{gemma4:e2b/12b}) & Local generation of SDC constraints; compared across families and sizes \\
+Model runtime & Ollama (local daemon + cloud endpoint) & Serves every LLM over a single HTTP API; the same interface drives local models and the hosted \texttt{minimax-m3:cloud}, so the pipeline code is model-agnostic \\
+Language models & Six models across three local families plus one cloud model (detailed below) & Generation of SDC constraints; compared across families, sizes, and dense vs.\ mixture-of-experts \\
 Synthesis engine & Yosys 0.63 & RTL elaboration, optimization, mapping, reporting \\
 Technology mapper & ABC (via Yosys) & Liberty-aware mapping with a delay target derived from \texttt{create\_clock} \\
 Timing analyzer & OpenSTA 3.1.0 & Post-synthesis timing analysis and slack extraction \\
@@ -67,8 +72,27 @@ Implementation language & Python 3.11+ & Orchestration, parsing, classification,
 
 The project remains intentionally lightweight: the only declared Python dependency is the \texttt{ollama} client package, while Yosys and OpenSTA are invoked as subprocess tools. This keeps the framework portable and easy to reproduce on a local macOS setup.
 
+\paragraph{LLMs line-up.} All models are served through Ollama. The five local models are pulled to disk and run on the machine's own memory, so their on-disk size effectively sets the RAM floor; the sixth, \texttt{minimax-m3:cloud}, runs on Ollama's hosted endpoint and stores nothing locally, which is why it carries no memory cost despite being a large model. The table separates \emph{total} parameters (everything that must be resident) from \emph{active} parameters (what is actually used per token): for dense models the two are equal, while the Gemma \texttt{e}-series uses a MatFormer design whose advertised ``effective'' size is smaller than the raw parameter count.
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{llrrl}
+\toprule
+\textbf{Model} & \textbf{Family} & \textbf{On-disk} & \textbf{Total} & \textbf{Active} \\
+\midrule
+qwen3:8b         & Qwen 3      & 5.2\,GB & 8.2\,B & 8.2\,B (dense) \\
+granite4.1:3b    & Granite 4.1 & 2.1\,GB & 3.4\,B & 3.4\,B (dense) \\
+granite4.1:8b    & Granite 4.1 & 5.3\,GB & 8.8\,B & 8.8\,B (dense) \\
+gemma4:e2b       & Gemma (e)   & 7.2\,GB & 5.1\,B & $\sim$2\,B (effective) \\
+gemma4:e4b       & Gemma (e)   & 9.6\,GB & 8.0\,B & $\sim$4\,B (effective) \\
+minimax-m3:cloud & MiniMax M3  & --- (cloud) & hosted & hosted \\
+\bottomrule
+\end{tabular}
+\end{table}
+
 \section*{Benchmark Set}
-The current benchmark suite contains six RTL designs, each paired with a trusted reference SDC under \texttt{designs/reference/}:
+The benchmark suite contains ten RTL designs, each paired with a trusted reference SDC under \texttt{designs/reference/}. The first six exercise clocking, port coverage, and basic timing paths. The remaining four were added later, once every model was reaching $\sim$100\% on the simpler designs, to reopen a measurable gap between models and between prompt versions:
 
 \begin{table}[h]
 \centering
@@ -82,11 +106,18 @@ fsm.v & Small finite-state machine benchmark \\
 adder.v & Registered arithmetic datapath \\
 alu.v & Multi-operation combinational and sequential datapath case \\
 shift\_reg.v & Serial-in / parallel-out sequential structure \\
+\midrule
+async\_in.v & Asynchronous input through a 2-flop synchronizer \\
+cdc\_sync.v & Two-clock clock-domain-crossing synchronizer \\
+clkdiv.v & $\div2$ clock divider with a derived clock domain \\
+mult\_mcp.v & Multi-cycle $16\times16$ multiply at a tight 1.5\,ns period \\
 \bottomrule
 \end{tabularx}
 \end{table}
 
-This is a sensible first benchmark layer: the designs are diverse enough to expose clocking, port coverage, and timing-path issues, while still being small enough for fast iterative experimentation.
+One exception recurs across the suite rather than belonging to any single design: every design with an asynchronous reset --- \texttt{counter}, \texttt{fsm}, \texttt{shift\_reg} and all four added designs --- must \texttt{set\_false\_path} on \texttt{rst\_n}, since the reset is not a timed data path. So \texttt{set\_false\_path} itself is a baseline requirement, not a marker of the harder designs.
+
+What makes the four added designs harder is the additional, design-specific construct each requires beyond \texttt{create\_clock} and the I/O delays. \texttt{async\_in} extends the false-path idea to a \emph{data} port: the asynchronous input feeding the 2-flop synchronizer must be false-pathed as well (\texttt{set\_false\_path -from [get\_ports async\_in]}), not just the reset. \texttt{cdc\_sync} needs \texttt{set\_clock\_groups -asynchronous} between its two clocks. \texttt{clkdiv} needs \texttt{create\_generated\_clock} to time the divided domain. \texttt{mult\_mcp} needs \texttt{set\_multicycle\_path 2} so the slow multiply meets timing at the tight 1.5\,ns period. A model that omits the required construct lands directly in \texttt{partial\_coverage} (an untimed domain) or a genuine \texttt{timing\_violation} --- exactly the gap these designs were meant to expose. Of the four, \texttt{async\_in} is the mildest (it reuses a command the model has likely already applied to the reset), while \texttt{clkdiv} and \texttt{mult\_mcp} introduce genuinely new constructs that no model reliably gets right.
 
 \section*{What the Framework Measures}
 Each run records both correctness and QoR-related information. The current CSV schema captures:
@@ -108,76 +139,123 @@ This is a strong design choice because it allows the project to separate several
     \item synthesis or STA failures caused by bad constraint content.
 \end{itemize}
 
-\section*{Current Dataset}
-As of \textbf{10th June 2026}, \texttt{results/dataset.csv} contains 186 runs: 6 reference plus, for each of five local models, 18 runs with the original prompt (\texttt{v1\_base}) and 18 with the revised prompt (\texttt{v2\_base}), across six designs and three seeds. The six reference runs complete successfully with full path-group coverage and serve as the control baseline. The five models span three architecture families and three size tiers: \texttt{qwen3:8b}, \texttt{granite4.1:3b}, \texttt{granite4.1:8b}, \texttt{gemma4:e2b}, and \texttt{gemma4:12b}.
-
-\paragraph{The prompt effect is universal.} Across \emph{every} model, the success rate collapses to near zero under \texttt{v1\_base} and jumps to near-perfect under \texttt{v2\_base}. The single difference is that \texttt{v2\_base} requires naming the clock with \texttt{-name} and attaching \texttt{-clock} to every I/O delay. Under \texttt{v1\_base} the dominant failure is \emph{partial\_coverage}: tools report clean timing, but only on register-to-register paths, because the missing \texttt{-clock} association leaves I/O delays inert. Since register-to-register paths are timed by \texttt{create\_clock} alone and essentially cannot fail, naive ``tool acceptance'' badly overstates success. This is the project's key methodological finding: \textbf{tool acceptance alone is not a valid success criterion; path-group coverage must be verified}.
+\section*{Results}
+As of \textbf{July 2026}, \texttt{results/dataset.csv} contains \textbf{610 runs}: 10 reference plus a complete factorial of six models $\times$ ten designs $\times$ five seeds $\times$ two prompt versions (600 LLM runs, no cell missing or duplicated). The ten reference runs all complete with full path-group coverage and serve as the control baseline. Correction is spent only on \texttt{v2\_base} failures, so \texttt{v1\_base} figures are pure generation throughout.
 
 \begin{table}[h]
 \centering
 \begin{tabular}{lrrrr}
 \toprule
-\textbf{Model} & \textbf{v1 ok\%} & \textbf{v2 ok\%} & \textbf{avg LLM s} & \textbf{family / tier} \\
+& \multicolumn{2}{c}{\textbf{As generated}} & \textbf{After correction} & \\
+\cmidrule(lr){2-3}
+\textbf{Model} & \texttt{v1\_base} & \texttt{v2\_base} & \texttt{v2\_base} & \textbf{gain} \\
 \midrule
-granite4.1:3b  & 0\%  & 89\%  & 2.3   & Granite / 3B \\
-granite4.1:8b  & 0\%  & 100\% & 5.4   & Granite / 8B \\
-gemma4:e2b     & 11\% & 100\% & 17.8  & Gemma / eff-2B \\
-qwen3:8b       & 0\%  & 100\% & 87.1  & Qwen / 8B \\
-gemma4:12b     & 22\% & 94\%  & 292.6 & Gemma / 12B \\
+gemma4:e2b       & 10\% & 80\% & 80\% & $+0$ \\
+gemma4:e4b       & 18\% & 74\% & 78\% & $+4$ \\
+granite4.1:3b    & 2\%  & 58\% & 68\% & $+10$ \\
+granite4.1:8b    & 0\%  & 70\% & 82\% & $+12$ \\
+qwen3:8b         & 2\%  & 78\% & 92\% & $+14$ \\
+minimax-m3:cloud & 80\% & 80\% & \textbf{98\%} & $+18$ \\
+\midrule
+\textbf{all models} & \textbf{19\%} & \textbf{73\%} & \textbf{83\%} & $+10$ \\
 \bottomrule
 \end{tabular}
-\caption*{\small ok\% and mean LLM generation time per run, by prompt version. avg LLM s shown for \texttt{v2\_base}.}
+\caption*{\small Share of runs reaching \texttt{ok} (synthesis and STA pass, timing met, \emph{and} all required path groups actually analyzed). Reference control: 100\% (10/10). Reading left to right, the jump between prompt versions is the prompt effect and the jump to the final column is the self-repair effect; they are kept in separate columns so the two cannot be silently added together.}
 \end{table}
 
-\paragraph{Speed varies by two orders of magnitude.} \texttt{granite4.1} generates valid SDC in 2--5\,s per run --- it is purpose-built for structured output and does not pad its answer --- versus 87\,s for \texttt{qwen3:8b} and 293\,s for \texttt{gemma4:12b}. With chain-of-thought disabled for fairness, \texttt{granite4.1:8b} reaches 100\% accuracy roughly $16\times$ faster than \texttt{qwen3:8b}. Notably, the \emph{effective-2B} \texttt{gemma4:e2b} outperforms the full \texttt{gemma4:12b} on both speed and accuracy.
-
-\paragraph{Intrinsic knowledge vs.\ prompting.} Only \texttt{gemma4:12b} achieves any \texttt{ok} runs under \texttt{v1\_base} (4 of 18). Inspection shows it spontaneously emits \texttt{-name} and \texttt{-clock} without being told to --- knowledge the other models lack and only apply when the \texttt{v2\_base} prompt reminds them. This distinguishes ``the model has the knowledge'' from ``the model needs prompting to apply it,'' a capability axis beyond a simple pass/fail rate.
-
-\paragraph{Netlist invariance and per-group slack.} A netlist-invariance check confirms cell count and chip area are identical to the reference for all runs and all models. This is expected: synthesis is driven only by the clock period, so the SDC's I/O delays cannot change the circuit --- only its timing analysis. What \emph{does} vary is the worst slack per path group, which exposes each model's implicit \emph{delay-value} strategy: a smaller chosen I/O delay leaves more slack. The tables below show the worst (minimum across seeds) \texttt{v2\_base} slack per group for two representative designs. Register-to-register slack is identical everywhere (it is timed by \texttt{create\_clock} alone, independent of I/O delays), while in2reg/reg2out slack tracks the chosen delay: \texttt{qwen3:8b} matches the reference exactly ($0$\,ns delays), \texttt{granite4.1:8b} is most conservative, and the others sit in between.
+Per design, the picture is sharply bimodal. Six of the ten designs are solved perfectly on the first attempt by every model at \texttt{v2\_base}; everything that remains is concentrated in the four designs added to break the saturation.
 
 \begin{table}[h]
 \centering
-\begin{minipage}{0.48\textwidth}
-\centering
-\begin{tabular}{lrrr}
+\small
+\begin{tabular}{lrr@{\qquad}lrr}
 \toprule
-\textbf{adder} & in2reg & reg2out & reg2reg \\
+\textbf{Design} & \textbf{first-shot} & \textbf{after} & \textbf{Design} & \textbf{first-shot} & \textbf{after} \\
 \midrule
-reference      & $+3.72$ & $+4.42$ & --- \\
-qwen3:8b       & $+3.72$ & $+4.42$ & --- \\
-granite4.1:3b  & $+3.22$ & $+3.92$ & --- \\
-granite4.1:8b  & $+2.22$ & $+2.92$ & --- \\
-gemma4:e2b     & $+3.22$ & $+3.92$ & --- \\
-gemma4:12b     & $+3.22$ & $+3.92$ & --- \\
+adder     & 30/30 & 30/30 & async\_in & 24/30 & \textbf{30/30} \\
+alu       & 30/30 & 30/30 & cdc\_sync & 20/30 & 23/30 \\
+counter   & 30/30 & 30/30 & clkdiv    & \textbf{0/30}  & \textbf{14/30} \\
+fsm       & 30/30 & 30/30 & mult\_mcp & \textbf{0/30}  & 6/30 \\
+shift\_reg & 29/30 & 29/30 & simple   & 27/30 & 27/30 \\
 \bottomrule
 \end{tabular}
-\end{minipage}\hfill
-\begin{minipage}{0.48\textwidth}
-\centering
-\begin{tabular}{lrrr}
-\toprule
-\textbf{counter} & in2reg & reg2out & reg2reg \\
-\midrule
-reference      & $+4.27$ & $+4.39$ & $+4.66$ \\
-qwen3:8b       & $+4.27$ & $+4.39$ & $+4.66$ \\
-granite4.1:3b  & $+3.05$ & $+2.89$ & $+4.66$ \\
-granite4.1:8b  & $+4.27$ & $+4.39$ & $+4.66$ \\
-gemma4:e2b     & $+3.77$ & $+3.89$ & $+4.66$ \\
-gemma4:12b     & $+3.77$ & $+3.89$ & $+4.66$ \\
-\bottomrule
-\end{tabular}
-\end{minipage}
-\caption*{\small Worst \texttt{v2\_base} slack (ns) per path group; ``---'' = group not present in the design.}
+\caption*{\small \texttt{v2\_base} runs reaching \texttt{ok}, out of 30 (six models $\times$ five seeds), before and after correction.}
 \end{table}
 
-\section*{Next Steps}
-With the coverage methodology solid and a five-model comparison established, the most valuable next steps are:
+\section*{Key Findings}
+
+\paragraph{1. Tool acceptance is not a valid success criterion.} This is the project's central methodological result and it shapes every number above. A static timing analyzer only times a path when both endpoints carry a clock reference; an unconstrained port is \emph{silently skipped}, not reported as an error. A constraint set that forgets to attach \texttt{-clock} to its I/O delays therefore produces a clean, violation-free STA report --- earned entirely on register-to-register paths, which are timed by \texttt{create\_clock} alone and essentially cannot fail. Under \texttt{v1\_base} this \texttt{partial\_coverage} pattern is the dominant failure (for example 25 of 50 runs for \texttt{granite4.1:8b}). Any evaluation that simply asks ``did the tool accept it?'' would score these as successes. The framework instead issues independent per-path-group queries and compares the groups actually analyzed against those the design structurally requires, so a run is \texttt{ok} only when the input$\to$register and register$\to$output paths were genuinely checked.
+
+\paragraph{2. Prompt design dominates every other factor.} Moving from \texttt{v1\_base} to \texttt{v2\_base} lifts the aggregate success rate from 19\% to 73\%. The entire difference is two structural requirements: name the clock with \texttt{-name}, and attach \texttt{-clock} to every I/O delay (delay \emph{values} are deliberately left to the model). No other intervention in this study comes close --- the full two-level correction ladder adds a further 10 points. The practical implication is that constraint-generation quality is governed less by model capability than by whether the prompt pins down the structural contract the timing tool needs.
+
+\paragraph{3. Generating and self-repairing are independent abilities.} The clearest single result in the dataset: \texttt{gemma4:e2b} and \texttt{minimax-m3:cloud} both generate at exactly 80\% on \texttt{v2\_base}, yet after correction one is unchanged at 80\% and the other reaches 98\%. Ranking models on one-shot accuracy would have called them equivalent. Repair ability is a distinct axis and must be measured separately.
+
+\paragraph{4. Capable models repair; small models actively regress.} Of the 80 runs that entered the correction loop, 29 (36\%) were repaired and 22 (28\%) came out \emph{strictly worse} --- and the split is almost perfectly stratified by model strength:
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{lrrrr}
+\toprule
+\textbf{Model} & \textbf{entered loop} & \textbf{repaired} & \textbf{regressed} & \textbf{unchanged} \\
+\midrule
+minimax-m3:cloud & 10 & \textbf{9} & \textbf{0} & 1 \\
+qwen3:8b         & 11 & \textbf{7} & \textbf{0} & 3 \\
+granite4.1:8b    & 15 & 6 & 3 & 6 \\
+granite4.1:3b    & 21 & 5 & \textbf{8} & 8 \\
+gemma4:e4b       & 13 & 2 & \textbf{6} & 3 \\
+gemma4:e2b       & 10 & \textbf{0} & \textbf{5} & 5 \\
+\bottomrule
+\end{tabular}
+\caption*{\small Outcome of the correction loop per model. The two strongest models repair most of what they enter with and never regress; the weakest repairs nothing and damages half of its attempts.}
+\end{table}
+
+The two strongest models repair 16 of 21 attempts with \emph{zero} regressions. The weakest, \texttt{gemma4:e2b}, repairs nothing at all and breaks five of ten. Twenty-one of the 22 regressions turned an SDC the tool had accepted into one it rejects outright: shown its own error and asked to fix it, a weak model rewrites too aggressively --- stripping \texttt{[get\_ports \dots]} wrappers, inventing flags --- and destroys syntax that previously worked. \textbf{A feedback loop is therefore not uniformly beneficial: below a capability threshold it is actively harmful}, and reporting only the aggregate success rate would hide this, because a run that is already \texttt{ok} never enters the loop and so the headline figure can only ever rise.
+
+\paragraph{5. Feedback quality decides whether correction helps or harms.} An initial single-retry design that returned only the raw tool symptom repaired just 8\% of attempts while regressing 26\%. Diagnosing those failures showed successful repairs were small edits while failures were expansions. Three changes followed: the correction prompt now demands minimal edits, the symptom names the exact ports or violating path group, and a second level supplies an object dictionary. The repair rate rose from 8\% to 36\% on the same models and designs.
+
+\paragraph{6. The residual failures are naming and application, not comprehension.} \texttt{clkdiv} is the sharpest case: \textbf{no model, on any seed, solves it first try (0/30)}, yet the object dictionary alone rescues 13 of 30. The models know they need a \texttt{create\_generated\_clock}; what they cannot do is name the target, because RTL signal names do not survive synthesis. A representative trajectory shows the two defects separating cleanly across levels:
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{ll}
+\toprule
+attempt 0 & \texttt{create\_generated\_clock -divide\_by 2 -name clk\_div [get\_ports clk]} \\
+level 1   & \texttt{\dots{} -source clk -name clk\_div [get\_ports clk]} \\
+level 2   & \texttt{\dots{} -source [get\_ports clk] -name clk\_div [get\_nets clk\_div]} \\
+\bottomrule
+\end{tabular}
+\caption*{\small \texttt{qwen3:8b} on \texttt{clkdiv}. Level 1 fixes the missing \texttt{-source} the tool named, but keeps pointing at the wrong object; only the object dictionary at level 2 supplies the missing namespace.}
+\end{table}
+
+\texttt{mult\_mcp} is the same story one step further out: 26 of 30 runs emit a \texttt{set\_multicycle\_path} at some point, but only 6 pass. The command is known; what fails is applying it to the right objects with the right argument order. Across the whole study, the single dominant cause of failure is the gap between the \emph{RTL} the model is shown and the \emph{gate-level netlist} the analyzer works on.
+
+\paragraph{7. Failure modes differ qualitatively by model.} With the classifier distinguishing SDC-text defects from semantic gaps, \texttt{syntax\_error} --- an invented command option such as \texttt{-edge}, \texttt{-relative} or \texttt{-add\_shift} --- is the dominant \texttt{v1\_base} failure for every local model (7--21 runs each). \texttt{minimax-m3:cloud} produces \textbf{zero} syntax errors under either prompt: it never hallucinates a flag. That single measure separates the cloud model from the local ones more cleanly than the success rate does.
+
+\paragraph{8. Constraints do not change the circuit, only its evaluation.} Cell count and chip area are identical to the reference for all 600 runs, because the SDC is read only by the timing analyzer and never reaches synthesis. Consequently no run can be judged on area or cell count, and slack magnitude is not a merit either: a value \emph{above} the reference simply means a looser, under-constrained I/O budget. What the per-group slack does reveal is calibration --- \texttt{minimax-m3:cloud} picks one delay value and holds it across seeds, sitting at or beside the reference, whereas the smallest models scatter their choice from 0 to 2\,ns run to run.
+
+\section*{Conclusions}
+The study set out to ask whether an LLM can produce synthesis constraints good enough to drive a real STA flow, and whether it can repair them when told what went wrong. Both answers are qualified yes, with the qualifications carrying most of the information.
+
+On \emph{generation}: with a prompt that states the structural contract, five of six models exceed 70\% and the best reaches 80\% first-shot, with six of ten designs solved perfectly. But the measurement only means something because coverage is verified --- under the naive ``did the tool accept it'' criterion, a large share of the \texttt{v1\_base} failures would have been scored as successes.
+
+On \emph{self-repair}: it works, and it is worth roughly a third of the remaining failures (36\% repaired, aggregate 73\%$\to$83\%), but only for models above a capability threshold and only with feedback that is precise and demands minimal edits. Below that threshold the same loop is destructive, and the aggregate success rate structurally cannot show it.
+
+The deepest finding is where the residual difficulty actually lies. It is not that models fail to understand clock division or multi-cycle timing --- they name the right construct unprompted. It is that they cannot reliably refer to objects in a netlist they have never seen, having been shown only RTL. That is a concrete, addressable gap: supplying the legal object vocabulary alone converted \texttt{clkdiv} from 0/30 to 14/30 without revealing anything about the reference solution.
+
+Finally, a methodological caution that generalizes beyond this project: every headline number here can be made to look better by measuring it slightly wrong. Pooling corrected and uncorrected prompt versions inflates the prompt effect; reporting success rate without coverage inflates everything; reporting it without regressions hides that the loop damages weak models. The instrumentation, not the models, was the hardest part to get right.
+
+\section*{Possible Future Steps}
+The results point to four follow-ups, ordered by how directly they attack the findings above.
+
 \begin{enumerate}[leftmargin=*,nosep]
-    \item expand the benchmark set with designs that stress multiple clocks, generated clocks, false/multicycle paths, and more complex timing interfaces;
-    \item extend the correction loop to fire on \texttt{partial\_coverage} and \texttt{timing\_violation}, not just synthesis failure, and quantify whether retry-based self-repair lifts \texttt{v1\_base} toward \texttt{v2\_base};
-    \item run more seeds (5--10) on the fastest accurate models (\texttt{granite4.1:8b}, \texttt{gemma4:e2b}) to confirm the 100\% is robust;
-    \item explore SDC-aware synthesis (feeding constraints into the mapper) so the more demanding question --- can the LLM \emph{safely relax} timing to reduce area without breaking function --- becomes measurable;
-    \item add plots for success rate, coverage, speed, and per-group slack distributions.
+    \item \textbf{Close the namespace gap at generation time.} Finding~6 shows the dominant residual cause is that models cannot name post-synthesis objects. Supplying the object vocabulary \emph{in the generation prompt} (a \texttt{v3}), rather than only as correction level~2, would test whether \texttt{clkdiv} can be solved first-shot instead of repaired. This is the cheapest intervention with the largest expected effect.
+    \item \textbf{Separate iteration depth from feedback strength.} The present ladder increases help and attempt count together, so a repair at level~2 cannot distinguish ``needed more tries'' from ``needed the dictionary''. Two conditions at equal depth --- constant feedback versus escalating feedback --- would separate them, and a convergence curve over 5 attempts would show whether persistence alone ever suffices. Attempt history in the prompt becomes necessary at that depth, since without memory a fifth attempt is merely a first attempt resampled.
+    \item \textbf{Guard the weak models against themselves.} Finding~4 shows 21 of 22 regressions turned an accepted SDC into a rejected one. A validity gate --- discard a correction that introduces an unknown command or flag and keep the previous version --- would make the loop monotone, and would test whether weak-model regression is a generation problem or merely an unguarded-loop problem.
+    \item \textbf{Make synthesis constraint-driven.}.For now, the netlist of all runs is invariant with respect to the SDCs, so no run can currently be judged on area or power. Feeding the SDC to the mapper (via an OpenROAD-style resizer) would let constraint quality shape the implementation and open the harder question: can a model \emph{safely relax} timing to reduce area without breaking function? That requires signing the resulting netlist off against the \emph{reference} SDC, so that under-constraining cannot masquerade as a QoR win.
 \end{enumerate}
+
+Two smaller items support the above: more seeds on the accurate models to tighten the interval around the $\sim$80\% generation ceiling, and further hard designs (interacting exceptions, deeper CDC, case analysis) now that the construct-forcing approach is validated.
 
 \end{document}
